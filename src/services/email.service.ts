@@ -1,22 +1,33 @@
-import sgMail from '@sendgrid/mail';
+import nodemailer from 'nodemailer';
 import { simpleParser } from 'mailparser';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 export class EmailService {
-  private fromEmail = process.env.EMAIL_FROM || 'damoladigitals1@gmail.com';
+  private fromEmail = process.env.EMAIL_FROM || 'bukkyglory2020@gmail.com';
+  private transporter: nodemailer.Transporter;
 
   constructor() {
-    // Configure SendGrid with API key
-    // We use SMTP_PASS as it contains the SG. API key
-    const apiKey = process.env.SMTP_PASS || '';
-    if (apiKey) {
-      sgMail.setApiKey(apiKey);
-      console.log('✅ SendGrid Web API initialized');
-    } else {
-      console.error('❌ SendGrid API Key missing (SMTP_PASS)');
-    }
+    // Configure NodeMailer with SMTP settings
+    this.transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.SMTP_PORT || '465'),
+      secure: process.env.SMTP_PORT === '465', // true for 465, false for other ports
+      auth: {
+        user: process.env.SMTP_USER || 'bukkyglory2020@gmail.com',
+        pass: process.env.SMTP_PASS || 'yimy lawo fnxj bqei',
+      },
+    });
+
+    // Verify connection configuration
+    this.transporter.verify((error, success) => {
+      if (error) {
+        console.error('❌ SMTP connection error:', error);
+      } else {
+        console.log('✅ SMTP transporter initialized');
+      }
+    });
   }
 
   /**
@@ -25,9 +36,9 @@ export class EmailService {
   async sendVerificationEmail(to: string, verificationToken: string, restaurantName: string): Promise<void> {
     const verificationUrl = `${process.env.FRONTEND_URL}/verify-email?token=${verificationToken}`;
 
-    const msg = {
+    const mailOptions = {
+      from: `TableNow <${this.fromEmail}>`,
       to,
-      from: this.fromEmail,
       subject: 'Verify your TableNow account',
       html: `
         <!DOCTYPE html>
@@ -67,10 +78,10 @@ export class EmailService {
     };
 
     try {
-      await sgMail.send(msg);
-      console.log(`Verification email sent to ${to} via SendGrid API`);
+      await this.transporter.sendMail(mailOptions);
+      console.log(`Verification email sent to ${to} via SMTP`);
     } catch (error: any) {
-      console.error('Error sending verification email:', error.response?.body || error.message);
+      console.error('Error sending verification email:', error.message);
       throw error;
     }
   }
@@ -87,9 +98,9 @@ export class EmailService {
     partySize: number;
     confirmationNumber: string;
   }): Promise<void> {
-    const msg = {
+    const mailOptions = {
+      from: `TableNow <${this.fromEmail}>`,
       to: data.to,
-      from: this.fromEmail,
       subject: `Booking Confirmation - ${data.restaurantName}`,
       html: `
         <!DOCTYPE html>
@@ -151,10 +162,10 @@ export class EmailService {
     };
 
     try {
-      await sgMail.send(msg);
-      console.log(`Booking confirmation sent to ${data.to} via SendGrid API`);
+      await this.transporter.sendMail(mailOptions);
+      console.log(`Booking confirmation sent to ${data.to} via SMTP`);
     } catch (error: any) {
-      console.error('Error sending booking confirmation:', error.response?.body || error.message);
+      console.error('Error sending booking confirmation:', error.message);
       throw error;
     }
   }
@@ -184,9 +195,9 @@ export class EmailService {
       </ul>
     ` : '';
 
-    const msg = {
+    const mailOptions = {
+      from: `TableNow Alert <${this.fromEmail}>`,
       to: data.to,
-      from: this.fromEmail,
       subject: `TableNow Alert: ${data.subject}`,
       html: `
         <!DOCTYPE html>
@@ -224,10 +235,10 @@ export class EmailService {
     };
 
     try {
-      await sgMail.send(msg);
-      console.log(`Restaurant notification sent to ${data.to} via SendGrid API`);
+      await this.transporter.sendMail(mailOptions);
+      console.log(`Restaurant notification sent to ${data.to} via SMTP`);
     } catch (error: any) {
-      console.error('Error sending restaurant notification:', error.response?.body || error.message);
+      console.error('Error sending restaurant notification:', error.message);
       throw error;
     }
   }
