@@ -4,7 +4,7 @@ import axios from 'axios';
 const VAPI_BASE_URL = 'https://api.vapi.ai';
 const ASSISTANT_ID = '35edd0e8-79db-4078-93d9-1585b84b887d';
 const VAPI_API_KEY = 'fad5f72a-178a-4af4-85c1-4f367c35170b'; // Taken from your logs
-const SERVER_URL = 'https://backendtablenow.onrender.com/api/vapi/webhook';
+const SERVER_URL = `${process.env.BACKEND_URL}/api/vapi/webhook`;
 
 const cleanTools = [
     {

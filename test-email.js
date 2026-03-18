@@ -10,6 +10,9 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER || 'bukkyglory2020@gmail.com',
     pass: process.env.SMTP_PASS || 'yimy lawo fnxj bqei',
   },
+  tls: {
+    rejectUnauthorized: false
+  }
 });
 
 const mailOptions = {

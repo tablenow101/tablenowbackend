@@ -18,6 +18,9 @@ export class EmailService {
         user: process.env.SMTP_USER || 'bukkyglory2020@gmail.com',
         pass: process.env.SMTP_PASS || 'yimy lawo fnxj bqei',
       },
+      tls: {
+        rejectUnauthorized: false
+      }
     });
 
     // Verify connection configuration

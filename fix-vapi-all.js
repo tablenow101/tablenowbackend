@@ -4,8 +4,8 @@ const envPath = path.resolve(__dirname, '.env');
 require('dotenv').config({ path: envPath });
 
 const VAPI_BASE_URL = 'https://api.vapi.ai';
-// HARDCODED NGROK URL JUST TO BE SAFE
-const NEW_SERVER_URL = 'https://c9fdad4648d0.ngrok-free.app/api/vapi/webhook';
+// USE BACKEND_URL FROM .ENV
+const NEW_SERVER_URL = `${process.env.BACKEND_URL}/api/vapi/webhook`;
 
 async function fixAllVapiEntities() {
     try {
