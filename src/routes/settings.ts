@@ -48,6 +48,9 @@ router.put('/', async (req: AuthRequest, res: Response) => {
         delete updates.verification_token;
         delete updates.vapi_phone_id;
         delete updates.vapi_assistant_id;
+        delete updates.vapi_phone_number;
+        delete updates.google_calendar_tokens;
+        delete updates.bcc_email;
 
         const { data: restaurant, error } = await supabase
             .from('restaurants')
