@@ -110,12 +110,28 @@ export class VapiService {
             console.log('📥 Vapi Response:', JSON.stringify(response.data, null, 2));
             return response.data;
         } catch (error: any) {
-            const errorData = error.response?.data;
             const errorStatus = error.response?.status;
+            if (errorStatus === 404) {
+                console.warn(`⚠️  VAPI Assistant ${assistantId} not found (404).`);
+                return null; // Return null instead of throwing for 404
+            }
+            const errorData = error.response?.data;
             console.error('❌ Error updating VAPI assistant');
             console.error('Status Code:', errorStatus);
             console.error('Error Details:', JSON.stringify(errorData || error.message, null, 2));
-            console.error('Full Error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Check if assistant exists on VAPI
+     */
+    async checkAssistantExists(assistantId: string): Promise<boolean> {
+        try {
+            await axios.get(`${VAPI_BASE_URL}/assistant/${assistantId}`, { headers: this.headers });
+            return true;
+        } catch (error: any) {
+            if (error.response?.status === 404) return false;
             throw error;
         }
     }

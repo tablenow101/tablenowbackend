@@ -67,10 +67,22 @@ router.put('/', async (req: AuthRequest, res: Response) => {
         // If restaurant details changed, update VAPI assistant
         if (restaurant.vapi_assistant_id) {
             try {
-                await vapiService.updateAssistant(restaurant.vapi_assistant_id, restaurant);
+                const updatedAssistant = await vapiService.updateAssistant(restaurant.vapi_assistant_id, restaurant);
+                
+                // If assistant was not found (404), clear it from our database
+                if (updatedAssistant === null) {
+                    console.log(`🧹 Clearing stale VAPI assistant ID ${restaurant.vapi_assistant_id} from database`);
+                    await supabase
+                        .from('restaurants')
+                        .update({ vapi_assistant_id: null })
+                        .eq('id', restaurantId);
+                    
+                    // Update the local restaurant object as well for the response
+                    restaurant.vapi_assistant_id = null;
+                }
             } catch (vapiError) {
                 console.error('VAPI update error:', vapiError);
-                // Don't fail the request if VAPI update fails
+                // Don't fail the request if VAPI update fails (other than 404)
             }
         }
 
@@ -100,9 +112,17 @@ router.post('/retry-vapi', async (req: AuthRequest, res: Response) => {
             return res.status(404).json({ error: 'Restaurant not found' });
         }
 
-        // Check if already provisioned
+        // Check if already provisioned (and verify if it still exists)
         if (restaurant.vapi_phone_number && restaurant.vapi_assistant_id) {
-            return res.status(400).json({ error: 'VAPI already configured' });
+            try {
+                const assistantExists = await vapiService.checkAssistantExists(restaurant.vapi_assistant_id);
+                if (assistantExists) {
+                    return res.status(400).json({ error: 'VAPI already configured and active.' });
+                }
+                console.log('⚠️  VAPI configuration exists in DB but assistant not found on VAPI. Proceeding with re-provisioning...');
+            } catch (checkError) {
+                console.warn('⚠️  Could not verify assistant existence, proceeding anyway...');
+            }
         }
 
         // Update status to provisioning
