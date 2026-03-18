@@ -231,10 +231,25 @@ router.post('/verify-email', async (req: Request, res: Response) => {
             // Create assistant first with enhanced knowledge base
             const assistant = await vapiService.createAssistant(restaurant);
             console.log('✅ VAPI Assistant created:', assistant.id);
+            
+            // SAVE ASSISTANT ID IMMEDIATELY
+            await supabase
+                .from('restaurants')
+                .update({ vapi_assistant_id: assistant.id })
+                .eq('id', restaurant.id);
 
             // Create phone number
             const phoneNumber = await vapiService.createPhoneNumber(restaurant.id, restaurant.name);
             console.log('✅ VAPI Phone number created:', phoneNumber.number || phoneNumber.id);
+
+            // SAVE PHONE DETAILS IMMEDIATELY
+            await supabase
+                .from('restaurants')
+                .update({ 
+                    vapi_phone_id: phoneNumber.id,
+                    vapi_phone_number: phoneNumber.number || phoneNumber.id 
+                })
+                .eq('id', restaurant.id);
 
             // Link assistant to phone number
             await vapiService.linkAssistantToPhone(phoneNumber.id, assistant.id);
@@ -244,13 +259,10 @@ router.post('/verify-email', async (req: Request, res: Response) => {
             const emailDomain = process.env.EMAIL_DOMAIN || 'gmail.com';
             const bccEmail = `bcc+r-${restaurant.id}@${emailDomain}`;
 
-            // Update restaurant with VAPI details
+            // Final update for status and BCC
             await supabase
                 .from('restaurants')
                 .update({
-                    vapi_phone_number: phoneNumber.number || phoneNumber.id, // Use actual number if available
-                    vapi_phone_id: phoneNumber.id,
-                    vapi_assistant_id: assistant.id,
                     bcc_email: bccEmail,
                     status: 'active'
                 })
