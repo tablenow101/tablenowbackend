@@ -145,6 +145,39 @@ class TwilioService {
     }
 
     /**
+     * Send an SMS using Twilio Programmable SMS
+     */
+    async sendSms(to: string, from: string, body: string): Promise<any> {
+        try {
+            if (!this.isConfigured()) {
+                throw new Error('Twilio credentials not configured');
+            }
+
+            const url = `${this.baseUrl}/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+
+            const response = await axios.post(
+                url,
+                new URLSearchParams({
+                    To: to,
+                    From: from,
+                    Body: body
+                }),
+                {
+                    headers: {
+                        'Authorization': `Basic ${this.auth}`,
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    }
+                }
+            );
+
+            return response.data;
+        } catch (error: any) {
+            console.error('Error sending SMS via Twilio:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    /**
      * Check if Twilio is configured
      */
     isConfigured(): boolean {

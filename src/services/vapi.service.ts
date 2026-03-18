@@ -37,7 +37,7 @@ export class VapiService {
      */
     async createAssistant(restaurantData: any): Promise<any> {
         try {
-            const serverUrl = `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/vapi/webhook`;
+            const serverUrl = `https://168.231.113.49/api/vapi/webhook`;
             const systemPrompt = this.generateEnhancedSystemPrompt(restaurantData);
 
             console.log(`🚀 Creating VAPI Assistant for ${restaurantData.name}...`);
@@ -80,7 +80,7 @@ export class VapiService {
     async updateAssistant(assistantId: string, restaurantData: any): Promise<any> {
         try {
             const systemPrompt = this.generateEnhancedSystemPrompt(restaurantData);
-            const serverUrl = `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/vapi/webhook`;
+            const serverUrl = `https://168.231.113.49/api/vapi/webhook`;
             const tools = this.generateTools();
 
             console.log(`🔄 Updating VAPI Assistant ${assistantId}...`);
@@ -125,7 +125,7 @@ export class VapiService {
      */
     async linkAssistantToPhone(phoneNumberId: string, assistantId: string): Promise<any> {
         try {
-            const serverUrl = `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/vapi/webhook`;
+            const serverUrl = `https://168.231.113.49/api/vapi/webhook`;
             const response = await axios.patch(
                 `${VAPI_BASE_URL}/phone-number/${phoneNumberId}`,
                 {
@@ -182,7 +182,7 @@ Note: If a tool returns an error, apologize and say you're having technical trou
      * Generate modern VAPI Tool definitions
      */
     private generateTools(): any[] {
-        const serverUrl = `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/vapi/webhook`;
+        const serverUrl = `https://168.231.113.49/api/vapi/webhook`;
 
         return [
             {

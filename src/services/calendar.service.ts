@@ -2,22 +2,30 @@ import { google } from 'googleapis';
 import ical from 'ical-generator';
 
 export class CalendarService {
-    private oauth2Client: any;
-
-    constructor() {
-        this.oauth2Client = new google.auth.OAuth2(
+    /**
+     * Create a fresh OAuth2 client for this specific request
+     * This avoids concurrency issues where multiple users hit the singleton
+     */
+    private createClient(tokens?: any) {
+        const client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
             process.env.GOOGLE_CLIENT_SECRET,
             process.env.GOOGLE_REDIRECT_URI
         );
+        if (tokens) {
+            client.setCredentials(tokens);
+        }
+        return client;
     }
 
     /**
      * Get authorization URL for Google Calendar
      */
     getAuthUrl(): string {
-        return this.oauth2Client.generateAuthUrl({
+        const client = this.createClient();
+        return client.generateAuthUrl({
             access_type: 'offline',
+            prompt: 'consent',
             scope: ['https://www.googleapis.com/auth/calendar']
         });
     }
@@ -27,7 +35,8 @@ export class CalendarService {
      */
     async getTokensFromCode(code: string): Promise<any> {
         try {
-            const { tokens } = await this.oauth2Client.getToken(code);
+            const client = this.createClient();
+            const { tokens } = await client.getToken(code);
             return tokens;
         } catch (error: any) {
             console.error('Error getting tokens:', error.message);
@@ -46,8 +55,8 @@ export class CalendarService {
         attendees?: string[];
     }): Promise<any> {
         try {
-            this.oauth2Client.setCredentials(tokens);
-            const calendar = google.calendar({ version: 'v3', auth: this.oauth2Client });
+            const client = this.createClient(tokens);
+            const calendar = google.calendar({ version: 'v3', auth: client });
 
             const event = {
                 summary: eventData.summary,
@@ -92,8 +101,8 @@ export class CalendarService {
         end?: Date;
     }): Promise<any> {
         try {
-            this.oauth2Client.setCredentials(tokens);
-            const calendar = google.calendar({ version: 'v3', auth: this.oauth2Client });
+            const client = this.createClient(tokens);
+            const calendar = google.calendar({ version: 'v3', auth: client });
 
             const event: any = {};
             if (eventData.summary) event.summary = eventData.summary;
@@ -129,8 +138,8 @@ export class CalendarService {
      */
     async deleteEvent(tokens: any, eventId: string): Promise<void> {
         try {
-            this.oauth2Client.setCredentials(tokens);
-            const calendar = google.calendar({ version: 'v3', auth: this.oauth2Client });
+            const client = this.createClient(tokens);
+            const calendar = google.calendar({ version: 'v3', auth: client });
 
             await calendar.events.delete({
                 calendarId: 'primary',
@@ -147,8 +156,8 @@ export class CalendarService {
      */
     async checkAvailability(tokens: any, startTime: Date, endTime: Date): Promise<boolean> {
         try {
-            this.oauth2Client.setCredentials(tokens);
-            const calendar = google.calendar({ version: 'v3', auth: this.oauth2Client });
+            const client = this.createClient(tokens);
+            const calendar = google.calendar({ version: 'v3', auth: client });
 
             const response = await calendar.freebusy.query({
                 requestBody: {
@@ -171,8 +180,8 @@ export class CalendarService {
      */
     async findAvailableSlots(tokens: any, date: Date): Promise<string[]> {
         try {
-            this.oauth2Client.setCredentials(tokens);
-            const calendar = google.calendar({ version: 'v3', auth: this.oauth2Client });
+            const client = this.createClient(tokens);
+            const calendar = google.calendar({ version: 'v3', auth: client });
 
             // Set time range for the whole day (e.g., 9 AM to 10 PM)
             const startOfDay = new Date(date);

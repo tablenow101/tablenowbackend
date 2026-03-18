@@ -11,7 +11,7 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
 }
 
 // FORCE USE OF NGROK URL IF ENV IS NOT UPDATED YET
-const NEW_SERVER_URL = 'https://25100e895fd8.ngrok-free.app/api/vapi/webhook';
+const NEW_SERVER_URL = 'https://168.231.113.49/api/vapi/webhook';
 const VAPI_BASE_URL = 'https://api.vapi.ai';
 
 const supabase = createClient(

@@ -5,6 +5,7 @@ import supabase from '../config/supabase';
 import emailService from '../services/email.service';
 import hubspotService from '../services/hubspot.service';
 import calendarService from '../services/calendar.service';
+import twilioService from '../services/twilio.service';
 
 const router = Router();
 
@@ -91,6 +92,18 @@ router.post('/', async (req: AuthRequest, res: Response) => {
             message: `New booking for ${partySize} guests on ${date} at ${time}`,
             bookingDetails: booking
         });
+
+        // Send SMS notification to restaurant if they have a VAPI number and a phone number
+        if (restaurant?.phone && restaurant?.vapi_phone_number && twilioService.isConfigured()) {
+            try {
+                const message = `TableNow: New booking received! ${guestName} for ${partySize} guests on ${date} at ${time}. Confirmation: ${confirmationNumber}`;
+                await twilioService.sendSms(restaurant.phone, restaurant.vapi_phone_number, message);
+                console.log(`SMS notification sent to ${restaurant.phone}`);
+            } catch (smsError) {
+                console.error('Failed to send SMS notification:', smsError);
+                // Don't fail the booking if SMS fails
+            }
+        }
 
         // Create HubSpot contact and deal
         try {

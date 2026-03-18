@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export class EmailService {
-  private fromEmail = process.env.EMAIL_FROM || 'tablenow101@gmail.com';
+  private fromEmail = process.env.EMAIL_FROM || 'damoladigitals1@gmail.com';
 
   constructor() {
     // Configure SendGrid with API key

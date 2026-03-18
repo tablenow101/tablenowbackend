@@ -3,6 +3,7 @@ import supabase from '../config/supabase';
 import emailService from '../services/email.service';
 import hubspotService from '../services/hubspot.service';
 import ragService from '../services/rag.service';
+import twilioService from '../services/twilio.service';
 
 // Load Calendar Service dynamically to avoid circular deps if any
 const calendarService = require('../services/calendar.service').default;
@@ -470,6 +471,18 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
             message: `${guestName} booked a table for ${partySize} on ${date} at ${time}. Special requests: ${specialRequests || 'None'}. Confirmation: ${confirmationNumber}. Source: Phone.`,
             bookingDetails: booking
         });
+    }
+
+    // Send SMS notification to restaurant if they have a VAPI number and a phone number
+    if (restaurant.phone && restaurant.vapi_phone_number && twilioService.isConfigured()) {
+        try {
+            const message = `TableNow AI: New booking via phone! ${guestName} for ${partySize} guests on ${date} at ${time}. Confirmation: ${confirmationNumber}`;
+            await twilioService.sendSms(restaurant.phone, restaurant.vapi_phone_number, message);
+            console.log(`SMS notification sent to ${restaurant.phone}`);
+        } catch (smsError) {
+            console.error('Failed to send SMS notification:', smsError);
+            // Don't fail the booking if SMS fails
+        }
     }
 
     // Create HubSpot contact and deal
