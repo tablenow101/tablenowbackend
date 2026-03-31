@@ -19,9 +19,25 @@ export class VapiService {
                 { headers: this.headers }
             );
 
+            console.log(`📞 VAPI phone pool returned ${response.data.length} numbers`);
+
             const availableNumber = response.data.find((p: any) => !p.assistantId);
 
             if (availableNumber) {
+                // VAPI returns the actual phone number in different fields depending on provider type
+                // Normalize it into a consistent .number property
+                const actualNumber = availableNumber.number 
+                    || availableNumber.phoneNumber 
+                    || availableNumber.sipUri 
+                    || availableNumber.name
+                    || null;
+                
+                console.log(`📞 Available number found. ID: ${availableNumber.id}, Raw number field: ${actualNumber}`);
+                console.log(`📞 Full phone object keys: ${Object.keys(availableNumber).join(', ')}`);
+                
+                // Attach the resolved number so auth.ts always finds it
+                availableNumber.number = actualNumber;
+                
                 return availableNumber;
             }
 
