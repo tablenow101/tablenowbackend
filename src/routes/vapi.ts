@@ -530,24 +530,32 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
 
     // 3. Send Emails & Notifications (Previous Logic)
     if (guestEmail) {
-        await emailService.sendBookingConfirmation({
-            to: guestEmail,
-            restaurantName: restaurant.name || 'Restaurant',
-            guestName,
-            date,
-            time,
-            partySize,
-            confirmationNumber
-        });
+        try {
+            await emailService.sendBookingConfirmation({
+                to: guestEmail,
+                restaurantName: restaurant.name || 'Restaurant',
+                guestName,
+                date,
+                time,
+                partySize,
+                confirmationNumber
+            });
+        } catch (emailErr) {
+            console.error('⚠️ Failed to send booking confirmation email:', emailErr);
+        }
     }
 
     if (restaurant.email) {
-        await emailService.sendRestaurantNotification({
-            to: restaurant.email,
-            subject: 'New Phone Booking',
-            message: `${guestName} booked a table for ${partySize} on ${date} at ${time}. Special requests: ${specialRequests || 'None'}. Confirmation: ${confirmationNumber}. Source: Phone.`,
-            bookingDetails: booking
-        });
+        try {
+            await emailService.sendRestaurantNotification({
+                to: restaurant.email,
+                subject: 'New Phone Booking',
+                message: `${guestName} booked a table for ${partySize} on ${date} at ${time}. Special requests: ${specialRequests || 'None'}. Confirmation: ${confirmationNumber}. Source: Phone.`,
+                bookingDetails: booking
+            });
+        } catch (emailErr) {
+            console.error('⚠️ Failed to send restaurant notification email:', emailErr);
+        }
     }
 
     // Send SMS notification to restaurant if they have a VAPI number and a phone number
