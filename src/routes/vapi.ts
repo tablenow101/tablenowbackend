@@ -30,6 +30,8 @@ router.post('/webhook', async (req: Request, res: Response) => {
                 return await handleToolCalls(event, res);
             case 'function-call':
                 return await handleFunctionCall(event, res);
+            case 'assistant-request':
+                return await handleAssistantRequest(event, res);
             case 'end-of-call-report':
                 console.log('Processing end-of-call-report event:', JSON.stringify(event, null, 2));
                 await handleCallEnded(event); // Reuse the same handler as call.ended
@@ -109,11 +111,30 @@ async function handleCallEnded(event: any) {
         phoneNum = call?.phoneNumber?.number || call?.phone?.number;
     }
     
+    // Robust extraction for duration, transcript, and recording
+    let duration = event.durationSeconds || event.duration || call?.duration || call?.durationSeconds || 0;
+    let finalTranscript = event.transcript || transcript || call?.transcript || '';
+    let finalRecordingUrl = event.recordingUrl || recording?.url || call?.recordingUrl || '';
+    let startedAt = event.startedAt || call?.startedAt;
+    let endedAt = event.endedAt || call?.endedAt;
+
+    // Fallback duration calculation if 0 but we have timestamps
+    if (!duration && startedAt && endedAt) {
+        const start = new Date(startedAt).getTime();
+        const end = new Date(endedAt).getTime();
+        if (end > start) {
+            duration = Math.floor((end - start) / 1000);
+        }
+    }
+
     console.log('Processing call end event:', {
         type: event.type,
         callId,
         phoneId,
         phoneNum,
+        extractedDuration: duration,
+        hasTranscript: !!finalTranscript,
+        hasRecording: !!finalRecordingUrl,
         eventKeys: Object.keys(event)
     });
 
@@ -123,10 +144,10 @@ async function handleCallEnded(event: any) {
             .from('call_logs')
             .update({
                 status: 'completed',
-                duration: call?.duration,
-                transcript: transcript,
-                recording_url: recording?.url,
-                ended_at: new Date().toISOString()
+                duration: duration,
+                transcript: finalTranscript,
+                recording_url: finalRecordingUrl,
+                ended_at: endedAt || new Date().toISOString()
             })
             .eq('call_id', callId)
             .select('id, restaurant_id');
@@ -151,20 +172,20 @@ async function handleCallEnded(event: any) {
             }
 
             if (restaurant) {
-                const startedAt = call?.startedAt
-                    ? new Date(call.startedAt).toISOString()
-                    : new Date(Date.now() - (call?.duration || 0) * 1000).toISOString();
+                const finalStartedAt = startedAt
+                    ? new Date(startedAt).toISOString()
+                    : new Date(Date.now() - (duration || 0) * 1000).toISOString();
 
                 await supabase.from('call_logs').insert({
                     restaurant_id: restaurant.id,
                     call_id: callId,
-                    caller_number: call.customer?.number,
+                    caller_number: call?.customer?.number,
                     status: 'completed',
-                    duration: call?.duration,
-                    transcript: transcript,
-                    recording_url: recording?.url,
-                    started_at: startedAt,
-                    ended_at: new Date().toISOString()
+                    duration: duration,
+                    transcript: finalTranscript,
+                    recording_url: finalRecordingUrl,
+                    started_at: finalStartedAt,
+                    ended_at: endedAt || new Date().toISOString()
                 });
             } else {
                 console.error('Restaurant not found for call.ended fallback:', { phoneId, phoneNum });
@@ -180,7 +201,7 @@ async function handleCallEnded(event: any) {
                     contactEmail: call.customer.email,
                     activityType: 'call',
                     subject: 'AI Phone Call',
-                    body: `Call duration: ${call?.duration || 0}s\n\nTranscript:\n${transcript || 'No transcript available'}`
+                    body: `Call duration: ${duration || 0}s\n\nTranscript:\n${finalTranscript || 'No transcript available'}`
                 });
             } catch (error) {
                 console.error('HubSpot logging error:', error);
@@ -211,6 +232,55 @@ async function handleFunctionCall(event: any, res: Response) {
     }
 
     return res.json(await executeFunctionCall(functionName, restaurant, parameters));
+}
+
+/**
+ * Handle assistant-request to inject dynamic overrides (Date/Time)
+ */
+async function handleAssistantRequest(event: any, res: Response) {
+    const call = event.call;
+    const phoneId = call?.phoneNumberId || event.phoneNumber?.id;
+    const phoneNum = call?.phoneNumber || event.phoneNumber?.number;
+
+    let { data: restaurant } = await supabase
+        .from('restaurants')
+        .select('*')
+        .eq('vapi_phone_id', phoneId || '')
+        .single();
+
+    if (!restaurant && phoneNum) {
+        const fallback = await supabase
+            .from('restaurants')
+            .select('*')
+            .eq('vapi_phone_number', phoneNum)
+            .single();
+        restaurant = fallback.data || null;
+    }
+
+    if (!restaurant) {
+        return res.json({ error: 'Restaurant not found' });
+    }
+
+    const now = new Date();
+    const currentDate = now.toISOString().split('T')[0];
+    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
+
+    console.log(`Injecting dynamic prompt for ${restaurant.name} context:`, { currentDate, currentTime, dayOfWeek });
+
+    // Inject system message override into the assistant model
+    return res.json({
+        assistant: {
+            model: {
+                messages: [
+                    {
+                        role: "system",
+                        content: `CRITICAL LIVE DATA DO NOT IGNORE:\n- Today's Date is: ${currentDate} (${dayOfWeek})\n- The Current Time is: ${currentTime}\n\nWARNING: Always use this date/time to resolve relative terms like 'tomorrow', 'next week', 'tonight', or 'this evening'. NEVER invent or guess a different year. The year is strictly ${now.getFullYear()}.`
+                    }
+                ]
+            }
+        }
+    });
 }
 
 /**
