@@ -21,27 +21,21 @@ export class VapiService {
 
             console.log(`📞 VAPI phone pool returned ${response.data.length} numbers`);
 
-            const availableNumber = response.data.find((p: any) => !p.assistantId);
+            // CRITICAL: Only pick phone numbers that have a real callable number (e.g. +14125381947)
+            // Skip SIP-only entries that have no .number field
+            const availableNumber = response.data.find((p: any) => !p.assistantId && p.number);
 
             if (availableNumber) {
-                // VAPI returns the actual phone number in different fields depending on provider type
-                // Normalize it into a consistent .number property
-                const actualNumber = availableNumber.number 
-                    || availableNumber.phoneNumber 
-                    || availableNumber.sipUri 
-                    || availableNumber.name
-                    || null;
-                
-                console.log(`📞 Available number found. ID: ${availableNumber.id}, Raw number field: ${actualNumber}`);
-                console.log(`📞 Full phone object keys: ${Object.keys(availableNumber).join(', ')}`);
-                
-                // Attach the resolved number so auth.ts always finds it
-                availableNumber.number = actualNumber;
-                
+                console.log(`📞 Available REAL number found: ${availableNumber.number} (ID: ${availableNumber.id})`);
                 return availableNumber;
             }
 
-            throw new Error('No available phone numbers in the Vapi pool.');
+            // If no real number is available, log what we have for debugging
+            const allAvailable = response.data.filter((p: any) => !p.assistantId);
+            console.error(`❌ No real phone numbers available. Found ${allAvailable.length} SIP-only entries.`);
+            allAvailable.forEach((p: any) => console.log(`   SIP: ${p.name || p.id}`));
+
+            throw new Error('No available phone numbers with a real callable number in the Vapi pool. Please purchase more numbers in your Vapi dashboard.');
         } catch (error: any) {
             console.error('Error assigning VAPI phone number:', error.response?.data || error.message);
             throw error;
