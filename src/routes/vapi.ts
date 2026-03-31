@@ -113,7 +113,8 @@ async function handleCallEnded(event: any) {
     }
     
     // Robust extraction for duration, transcript, and recording
-    let duration = event.durationSeconds || event.duration || call?.duration || call?.durationSeconds || 0;
+    let rawDuration = event.durationSeconds || event.duration || call?.duration || call?.durationSeconds || 0;
+    let duration = Math.round(Number(rawDuration) || 0);
     let finalTranscript = event.transcript || transcript || call?.transcript || '';
     let finalRecordingUrl = event.recordingUrl || recording?.url || call?.recordingUrl || '';
     let startedAt = event.startedAt || call?.startedAt;
@@ -177,7 +178,7 @@ async function handleCallEnded(event: any) {
                     ? new Date(startedAt).toISOString()
                     : new Date(Date.now() - (duration || 0) * 1000).toISOString();
 
-                await supabase.from('call_logs').insert({
+                const { error: insertError } = await supabase.from('call_logs').insert({
                     restaurant_id: restaurant.id,
                     call_id: callId,
                     caller_number: call?.customer?.number,
@@ -188,6 +189,12 @@ async function handleCallEnded(event: any) {
                     started_at: finalStartedAt,
                     ended_at: endedAt || new Date().toISOString()
                 });
+                
+                if (insertError) {
+                    console.error('Call log insert error:', insertError);
+                } else {
+                    console.log('Call log cleanly inserted.');
+                }
             } else {
                 console.error('Restaurant not found for call.ended fallback:', { phoneId, phoneNum });
             }
@@ -277,14 +284,9 @@ async function handleAssistantRequest(event: any, res: Response) {
 
     // Inject system message override into the assistant model
     return res.json({
-        assistant: {
+        assistantOverrides: {
             model: {
-                messages: [
-                    {
-                        role: "system",
-                        content: basePrompt + dynamicTimeContext
-                    }
-                ]
+                systemPrompt: basePrompt + dynamicTimeContext
             }
         }
     });
