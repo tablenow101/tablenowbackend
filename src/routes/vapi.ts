@@ -3,7 +3,7 @@ import supabase from '../config/supabase';
 import emailService from '../services/email.service';
 import hubspotService from '../services/hubspot.service';
 import ragService from '../services/rag.service';
-import twilioService from '../services/twilio.service';
+
 import vapiService from '../services/vapi.service';
 
 // Load Calendar Service dynamically to avoid circular deps if any
