@@ -160,7 +160,7 @@ export class VapiService {
     /**
      * Generate enhanced system prompt
      */
-    private generateEnhancedSystemPrompt(restaurantData: any): string {
+    public generateEnhancedSystemPrompt(restaurantData: any): string {
         return `You are a highly professional, human-like AI Receptionist for ${restaurantData.name}. 
 
 **CRITICAL RULES & BEHAVIOR:**

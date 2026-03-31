@@ -4,6 +4,7 @@ import emailService from '../services/email.service';
 import hubspotService from '../services/hubspot.service';
 import ragService from '../services/rag.service';
 import twilioService from '../services/twilio.service';
+import vapiService from '../services/vapi.service';
 
 // Load Calendar Service dynamically to avoid circular deps if any
 const calendarService = require('../services/calendar.service').default;
@@ -268,6 +269,12 @@ async function handleAssistantRequest(event: any, res: Response) {
 
     console.log(`Injecting dynamic prompt for ${restaurant.name} context:`, { currentDate, currentTime, dayOfWeek });
 
+    // Fetch the baseline system prompt from the service
+    const basePrompt = vapiService.generateEnhancedSystemPrompt(restaurant);
+
+    // Create the dynamic time-injection string
+    const dynamicTimeContext = `\n\nCRITICAL LIVE DATA DO NOT IGNORE:\n- Today's Date is: ${currentDate} (${dayOfWeek})\n- The Current Time is: ${currentTime}\n\nWARNING: Always use this date/time to resolve relative terms like 'tomorrow', 'next week', 'tonight', or 'this evening'. NEVER invent or guess a different year. The year is strictly ${now.getFullYear()}.\n\n`;
+
     // Inject system message override into the assistant model
     return res.json({
         assistant: {
@@ -275,7 +282,7 @@ async function handleAssistantRequest(event: any, res: Response) {
                 messages: [
                     {
                         role: "system",
-                        content: `CRITICAL LIVE DATA DO NOT IGNORE:\n- Today's Date is: ${currentDate} (${dayOfWeek})\n- The Current Time is: ${currentTime}\n\nWARNING: Always use this date/time to resolve relative terms like 'tomorrow', 'next week', 'tonight', or 'this evening'. NEVER invent or guess a different year. The year is strictly ${now.getFullYear()}.`
+                        content: basePrompt + dynamicTimeContext
                     }
                 ]
             }
