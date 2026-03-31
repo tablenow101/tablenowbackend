@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { VapiService } from '../services/vapi.service';
 import path from 'path';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
@@ -19,6 +20,7 @@ async function updateAllAssistants() {
 
     const VAPI_BASE_URL = 'https://api.vapi.ai';
     const VAPI_API_KEY = process.env.VAPI_API_KEY;
+    const vapiService = new VapiService();
 
     for (const restaurant of restaurants) {
         if (restaurant.vapi_assistant_id) {
@@ -81,7 +83,8 @@ Remember: You represent this restaurant. Every call is an opportunity to make so
                     model: {
                         provider: 'openai',
                         model: 'gpt-4o',
-                        systemPrompt: systemPrompt
+                        systemPrompt: systemPrompt,
+                        tools: vapiService.generateTools()
                     }
                 }, {
                     headers: {

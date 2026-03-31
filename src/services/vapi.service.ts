@@ -245,7 +245,7 @@ Remember: You represent this restaurant. Every call is an opportunity to make so
     /**
      * Generate VAPI Tool definitions
      */
-    private generateTools(): any[] {
+    public generateTools(): any[] {
         return [
             {
                 type: 'function',
