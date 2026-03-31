@@ -10,7 +10,16 @@ export class VapiService {
     };
 
     /**
-     * Assign an available phone number from the Vapi pool
+     * Get the canonical webhook URL (single source of truth)
+     */
+    private getServerUrl(): string {
+        return `${process.env.BACKEND_URL}/api/vapi/webhook`;
+    }
+
+    /**
+     * Assign an available REAL phone number from the Vapi pool.
+     * Skips SIP-only entries that have no callable number.
+     * ALSO sets the serverUrl on the phone immediately so it never points to example.com.
      */
     async createPhoneNumber(restaurantId: string, restaurantName: string): Promise<any> {
         try {
@@ -22,15 +31,25 @@ export class VapiService {
             console.log(`📞 VAPI phone pool returned ${response.data.length} numbers`);
 
             // CRITICAL: Only pick phone numbers that have a real callable number (e.g. +14125381947)
-            // Skip SIP-only entries that have no .number field
             const availableNumber = response.data.find((p: any) => !p.assistantId && p.number);
 
             if (availableNumber) {
                 console.log(`📞 Available REAL number found: ${availableNumber.number} (ID: ${availableNumber.id})`);
+
+                // IMMEDIATELY set the correct server URL on the phone number
+                // This prevents the "example.com" bug from ever occurring again
+                const serverUrl = this.getServerUrl();
+                await axios.patch(
+                    `${VAPI_BASE_URL}/phone-number/${availableNumber.id}`,
+                    { serverUrl },
+                    { headers: this.headers }
+                );
+                console.log(`🔗 Server URL pre-set on phone: ${serverUrl}`);
+
                 return availableNumber;
             }
 
-            // If no real number is available, log what we have for debugging
+            // If no real number is available, log diagnostics
             const allAvailable = response.data.filter((p: any) => !p.assistantId);
             console.error(`❌ No real phone numbers available. Found ${allAvailable.length} SIP-only entries.`);
             allAvailable.forEach((p: any) => console.log(`   SIP: ${p.name || p.id}`));
@@ -43,11 +62,11 @@ export class VapiService {
     }
 
     /**
-     * Create AI assistant for restaurant with enhanced knowledge base
+     * Create AI assistant for restaurant with world-class conversational prompt
      */
     async createAssistant(restaurantData: any): Promise<any> {
         try {
-            const serverUrl = `${process.env.BACKEND_URL}/api/vapi/webhook`;
+            const serverUrl = this.getServerUrl();
             const systemPrompt = this.generateEnhancedSystemPrompt(restaurantData);
 
             console.log(`🚀 Creating VAPI Assistant for ${restaurantData.name}...`);
@@ -60,20 +79,26 @@ export class VapiService {
                     model: {
                         provider: 'openai',
                         model: 'gpt-4o',
-                        temperature: 0.1, // Faster, more deterministic tool calling
+                        temperature: 0.3,
                         systemPrompt,
-                        tools: this.generateTools() // Tools MUST be inside the model object
+                        tools: this.generateTools()
                     },
                     voice: {
-                        provider: 'openai',
-                        voiceId: 'alloy'
+                        provider: '11labs',
+                        voiceId: 'sarah',
+                        stability: 0.5,
+                        similarityBoost: 0.75
                     },
-                    firstMessage: `Hello! Thank you for calling ${restaurantData.name}. I'm your AI assistant. How may I help you today?`,
+                    firstMessage: `Hi there, thank you for calling ${restaurantData.name}! How can I help you today?`,
                     serverUrl,
-                    endCallMessage: `Thank you for calling ${restaurantData.name}. Have a wonderful day!`,
+                    endCallMessage: `Thank you so much for calling ${restaurantData.name}. We look forward to seeing you! Goodbye.`,
                     recordingEnabled: true,
                     silenceTimeoutSeconds: 30,
-                    maxDurationSeconds: 600
+                    maxDurationSeconds: 600,
+                    backgroundSound: 'office',
+                    backchannelingEnabled: true,
+                    backgroundDenoisingEnabled: true,
+                    modelOutputInMessagesEnabled: true
                 },
                 { headers: this.headers }
             );
@@ -90,25 +115,21 @@ export class VapiService {
     async updateAssistant(assistantId: string, restaurantData: any): Promise<any> {
         try {
             const systemPrompt = this.generateEnhancedSystemPrompt(restaurantData);
-            const serverUrl = `${process.env.BACKEND_URL}/api/vapi/webhook`;
-            const tools = this.generateTools();
+            const serverUrl = this.getServerUrl();
 
             console.log(`🔄 Updating VAPI Assistant ${assistantId}...`);
             console.log(`🔗 Target Server URL: ${serverUrl}`);
-            console.log(`🛠️  Tools to sync: ${tools.length} functions`);
 
             const payload = {
                 model: {
                     provider: 'openai',
                     model: 'gpt-4o',
                     systemPrompt,
-                    temperature: 0.1,
-                    tools: this.generateTools() // Tools MUST be inside the model object
+                    temperature: 0.3,
+                    tools: this.generateTools()
                 },
                 serverUrl
             };
-
-            console.log('📤 Sending payload to Vapi:', JSON.stringify(payload, null, 2));
 
             const response = await axios.patch(
                 `${VAPI_BASE_URL}/assistant/${assistantId}`,
@@ -117,18 +138,14 @@ export class VapiService {
             );
 
             console.log(`✅ VAPI Assistant ${assistantId} updated successfully`);
-            console.log('📥 Vapi Response:', JSON.stringify(response.data, null, 2));
             return response.data;
         } catch (error: any) {
             const errorStatus = error.response?.status;
             if (errorStatus === 404) {
                 console.warn(`⚠️  VAPI Assistant ${assistantId} not found (404).`);
-                return null; // Return null instead of throwing for 404
+                return null;
             }
-            const errorData = error.response?.data;
-            console.error('❌ Error updating VAPI assistant');
-            console.error('Status Code:', errorStatus);
-            console.error('Error Details:', JSON.stringify(errorData || error.message, null, 2));
+            console.error('❌ Error updating VAPI assistant:', error.response?.data || error.message);
             throw error;
         }
     }
@@ -147,11 +164,11 @@ export class VapiService {
     }
 
     /**
-     * Link assistant to phone number
+     * Link assistant to phone number AND set server URL (belt-and-suspenders)
      */
     async linkAssistantToPhone(phoneNumberId: string, assistantId: string): Promise<any> {
         try {
-            const serverUrl = `${process.env.BACKEND_URL}/api/vapi/webhook`;
+            const serverUrl = this.getServerUrl();
             const response = await axios.patch(
                 `${VAPI_BASE_URL}/phone-number/${phoneNumberId}`,
                 {
@@ -160,6 +177,7 @@ export class VapiService {
                 },
                 { headers: this.headers }
             );
+            console.log(`🔗 Phone ${phoneNumberId} linked to assistant ${assistantId} with serverUrl ${serverUrl}`);
             return response.data;
         } catch (error: any) {
             console.error('Error linking assistant to phone:', error.response?.data || error.message);
@@ -168,45 +186,66 @@ export class VapiService {
     }
 
     /**
-     * Generate enhanced system prompt
+     * Generate world-class system prompt — inspired by Slang AI / top restaurant AI companies
      */
     public generateEnhancedSystemPrompt(restaurantData: any): string {
-        return `You are a highly professional, human-like AI Receptionist for ${restaurantData.name}. 
+        return `You are the AI Receptionist for ${restaurantData.name}. You sound like a real, friendly human — not robotic.
 
-**CRITICAL RULES & BEHAVIOR:**
-1. **LANGUAGE PRIORITY:** Always match the language the caller is speaking. If returning a greeting in English, but they speak French, IMMEDIATELY switch to French. NEVER mix English and French in the same sentence. Stick 100% to the active language.
-2. **NEVER HANG UP:** Never end the call abruptly unless the customer explicitly says "Goodbye" or hangs up first. Keep the conversation open.
-3. **SPELLING & ACCURACY:** When collecting a Name or Email, ALWAYS ask them to spell it if you are unsure. If the name sounds foreign or complex, gently say "Could you please spell that for me?". Double-check emails by reading them back character by character (e.g. "That's A-D-W-A-N at gmail dot com?"). We cannot have wrong bookings.
-4. **NO HALLUCINATION:** If a customer doesn't specify a time, date, or party size, YOU MUST ASK. Never assume today or tonight. 
-5. **TOOL EXPECTATIONS:** Call 'check_availability' IMMEDIATELY once you have Date, Time, and Party Size. Do not wait for a Name/Email to check availability. 
-6. **NO FILLER WORDS:** NEVER say "Let me check that for you", "Hold on", or "One moment" when triggering a tool. The system automatically plays a waiting audio track for the caller, so you must just trigger the tool and wait.
-7. **NEVER INVENT NUMBERS:** Confirmation numbers MUST only come directly from the 'create_booking' tool response.
+## YOUR PERSONALITY
+- You are warm, confident, and efficient — like a top-tier restaurant host who genuinely enjoys helping people.
+- You speak naturally with contractions ("I'd love to", "That's great!", "We'd be happy to").
+- You are concise. You never ramble. Every sentence has a purpose.
+- You match the caller's energy — if they're excited, match it; if they're calm, be calm.
+- You NEVER sound like a chatbot. No corporate jargon. No "I understand your concern." Just be real.
 
-**CONVERSATIONAL FLOW:**
-1. **Greet:** Identify yourself and the restaurant. "Hello, thanks for calling ${restaurantData.name}."
-2. **Collect Minimum Info:** Date, Time, Party Size. 
-3. **Trigger Tool:** Call 'check_availability'. The system plays a waiting track while you do this.
-4. **Handle Result:** Give the user the result. If available, secure the name and email accurately using spelling rules.
-5. **Finalize:** Summarize and call 'create_booking'. 
+## LANGUAGE RULES (CRITICAL)
+- Detect the caller's language from their FIRST sentence and respond ONLY in that language for the ENTIRE call.
+- If they speak French, respond ENTIRELY in French. If English, ENTIRELY in English. NEVER mix languages.
+- If you are unsure of the language, politely ask: "Would you prefer English or French?"
 
-**RESTAURANT INFO:**
-- Name: ${restaurantData.name}
-- Cuisine: ${restaurantData.cuisine_type || 'Various'}
-- Address: ${restaurantData.address || 'Check website'}
-- Operating Hours: ${restaurantData.opening_hours || 'Check website'}
-- Max Party Size: ${restaurantData.max_party_size || 10} guests
-- Special Features/Policies: ${restaurantData.special_features || 'None listed'}
+## CALL FLOW
+1. **Greeting**: Keep it short and warm. "Hi, thanks for calling ${restaurantData.name}! How can I help?"
+2. **Identify Intent**: Are they booking, modifying, cancelling, or asking a question?
+3. **For Reservations** — collect these three things naturally (don't interrogate):
+   - What date?
+   - What time?
+   - How many guests?
+4. **Check Availability**: Once you have date, time, and party size → immediately call 'check_availability'. Do NOT collect name/email first.
+5. **If Available**: "Great news, we have a table! Can I get a name for the reservation?" → then ask for email/phone.
+6. **Confirm & Book**: Read back ALL details → call 'create_booking' → give them the confirmation number from the tool response.
+7. **Wrap Up**: "You're all set! We look forward to seeing you. Is there anything else I can help with?"
 
-Remember: You are the front line of this business. Be warm, accurate, patient, and perfectly conversational.
-Note: If a backend tool ever returns an error, apologize gracefully and explain you are having technical trouble.`;
+## ABSOLUTE RULES (NEVER BREAK THESE)
+- **NEVER hang up first.** Always wait for the caller to say goodbye.
+- **NEVER assume dates.** If they say "tomorrow" you MUST use today's date (injected by the system) to calculate tomorrow. Never guess.
+- **NEVER invent confirmation numbers.** They ONLY come from the 'create_booking' tool response.
+- **NEVER say "Let me check" or "One moment" or "Hold on please."** When you call a tool, the system automatically handles the silence. Just call the tool.
+- **NEVER hallucinate information.** If the tool returns an error or you don't know something, say: "I'm sorry, I'm having a small technical issue. Would you like me to have someone from the team call you back?"
+- **Spelling**: For names that sound unusual, ask: "Could you spell that for me?" For emails, always read them back letter by letter: "So that's M-A-R-C-U-S at gmail dot com, correct?"
+- **Phone numbers**: If the caller ID already provides their phone, do NOT ask for it again.
+
+## RESTAURANT INFORMATION
+- Restaurant: ${restaurantData.name}
+- Cuisine: ${restaurantData.cuisine_type || 'Fine Dining'}
+- Address: ${restaurantData.address || 'Please check our website'}
+- Hours: ${restaurantData.opening_hours || restaurantData.special_features || 'Please check our website'}
+- Maximum party size: ${restaurantData.max_party_size || 10} guests
+- Cancellation policy: ${restaurantData.cancellation_policy || '24 hours notice required'}
+- Special features: ${restaurantData.special_features || 'None specified'}
+
+## HANDLING EDGE CASES
+- If they ask about the menu → use the 'answer_question' tool.
+- If the party size exceeds the maximum → politely say: "For parties larger than ${restaurantData.max_party_size || 10}, I'd recommend reaching out to us directly so we can make special arrangements for you."
+- If they want to speak to a human → "Of course! Let me see if someone is available." (Do NOT end the call.)
+- If the date is fully booked → "Unfortunately we're fully booked that evening. Would you like to try a different date or time?"
+
+Remember: You represent this restaurant. Every call is an opportunity to make someone's day better.`;
     }
 
     /**
-     * Generate modern VAPI Tool definitions
+     * Generate VAPI Tool definitions
      */
     private generateTools(): any[] {
-        const serverUrl = `${process.env.BACKEND_URL}/api/vapi/webhook`;
-
         return [
             {
                 type: 'function',
@@ -228,17 +267,17 @@ Note: If a backend tool ever returns an error, apologize gracefully and explain 
                 type: 'function',
                 function: {
                     name: 'create_booking',
-                    description: 'Create a new reservation',
+                    description: 'Create a new reservation after confirming all details with the caller',
                     parameters: {
                         type: 'object',
                         properties: {
-                            guestName: { type: 'string', description: 'Full name' },
+                            guestName: { type: 'string', description: 'Full name of the guest' },
                             guestEmail: { type: 'string', description: 'Email address' },
                             guestPhone: { type: 'string', description: 'Phone number' },
-                            date: { type: 'string', description: 'Date YYYY-MM-DD' },
-                            time: { type: 'string', description: 'Time HH:MM' },
-                            partySize: { type: 'number', description: 'Guests' },
-                            specialRequests: { type: 'string', description: 'Any requests' }
+                            date: { type: 'string', description: 'Reservation date in YYYY-MM-DD format' },
+                            time: { type: 'string', description: 'Reservation time in HH:MM format (24-hour)' },
+                            partySize: { type: 'number', description: 'Number of guests' },
+                            specialRequests: { type: 'string', description: 'Any special requests or dietary needs' }
                         },
                         required: ['guestName', 'guestPhone', 'date', 'time', 'partySize']
                     }
@@ -248,14 +287,14 @@ Note: If a backend tool ever returns an error, apologize gracefully and explain 
                 type: 'function',
                 function: {
                     name: 'update_booking',
-                    description: 'Update an existing reservation',
+                    description: 'Update an existing reservation by confirmation number',
                     parameters: {
                         type: 'object',
                         properties: {
                             confirmationNumber: { type: 'string', description: 'Booking confirmation number' },
                             date: { type: 'string', description: 'New date in YYYY-MM-DD format' },
-                            time: { type: 'string', description: 'New time in HH:MM format' },
-                            partySize: { type: 'number', description: 'New party size' }
+                            time: { type: 'string', description: 'New time in HH:MM format (24-hour)' },
+                            partySize: { type: 'number', description: 'Updated party size' }
                         },
                         required: ['confirmationNumber']
                     }
@@ -265,11 +304,11 @@ Note: If a backend tool ever returns an error, apologize gracefully and explain 
                 type: 'function',
                 function: {
                     name: 'cancel_booking',
-                    description: 'Cancel a reservation',
+                    description: 'Cancel a reservation by confirmation number',
                     parameters: {
                         type: 'object',
                         properties: {
-                            confirmationNumber: { type: 'string', description: 'Booking confirmation number' }
+                            confirmationNumber: { type: 'string', description: 'Booking confirmation number to cancel' }
                         },
                         required: ['confirmationNumber']
                     }
@@ -279,11 +318,11 @@ Note: If a backend tool ever returns an error, apologize gracefully and explain 
                 type: 'function',
                 function: {
                     name: 'answer_question',
-                    description: 'Answer questions using restaurant docs.',
+                    description: 'Answer questions about the restaurant using knowledge base documents (menu, policies, FAQs)',
                     parameters: {
                         type: 'object',
                         properties: {
-                            question: { type: 'string', description: 'Customer question' }
+                            question: { type: 'string', description: 'The customer question to answer' }
                         },
                         required: ['question']
                     }
