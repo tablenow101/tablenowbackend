@@ -284,7 +284,7 @@ async function handleAssistantRequest(event: any, res: Response) {
 
     // Inject system message override into the assistant model
     return res.json({
-        assistantOverrides: {
+        assistant: {
             model: {
                 systemPrompt: basePrompt + dynamicTimeContext
             }
