@@ -1,8 +1,9 @@
 import nodemailer from 'nodemailer';
 import { simpleParser } from 'mailparser';
 import dotenv from 'dotenv';
+import path from 'path';
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export class EmailService {
   private fromEmail = process.env.EMAIL_FROM || 'bukkyglory2020@gmail.com';

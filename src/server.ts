@@ -1,6 +1,8 @@
-// Load environment variables FIRST before any other imports
 import dotenv from 'dotenv';
-dotenv.config();
+import path from 'path';
+
+// For PM2 production safety, explicitly resolve the .env path regardless of where the app is launched from
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
