@@ -277,7 +277,7 @@ Tu représentes ce restaurant. Chaque appel est une opportunité de fidéliser u
                 type: 'function',
                 function: {
                     name: 'create_booking',
-                    description: 'Crée la réservation après confirmation orale de tous les détails. Appelle ce tool uniquement après avoir récapitulé et obtenu l'accord du client.',
+                    description: "Crée la réservation après confirmation orale de tous les détails. Appelle ce tool uniquement après avoir récapitulé et obtenu l'accord du client.",
                     parameters: {
                         type: 'object',
                         properties: {
