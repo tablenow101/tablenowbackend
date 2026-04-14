@@ -11,6 +11,10 @@ import ragService from '../services/rag.service';
 
 const router = Router();
 
+function generateSlug(name: string): string {
+    return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -82,6 +86,18 @@ router.post('/register', upload.fields([
         // Generate verification token
         const verificationToken = uuidv4();
 
+        // Generate slug from restaurant name
+        let slug = generateSlug(restaurantName);
+        // Ensure uniqueness by checking DB
+        const { data: existing } = await supabase
+            .from('restaurants')
+            .select('id')
+            .eq('slug', slug)
+            .single();
+        if (existing) {
+            slug = `${slug}-${Date.now().toString(36).slice(-4)}`;
+        }
+
         // Process uploaded files
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
         const documents: any = {};
@@ -111,7 +127,8 @@ router.post('/register', upload.fields([
                 policies_url: documents.policies_url,
                 verification_token: verificationToken,
                 is_verified: false,
-                status: 'pending'
+                status: 'pending',
+                slug,
             })
             .select()
             .single();
@@ -253,7 +270,7 @@ router.post('/verify-email', async (req: Request, res: Response) => {
             // Create assistant first with enhanced knowledge base
             const assistant = await vapiService.createAssistant(restaurant);
             console.log('✅ VAPI Assistant created:', assistant.id);
-            
+
             // SAVE ASSISTANT ID IMMEDIATELY
             await supabase
                 .from('restaurants')
@@ -267,9 +284,9 @@ router.post('/verify-email', async (req: Request, res: Response) => {
             // SAVE PHONE DETAILS IMMEDIATELY
             await supabase
                 .from('restaurants')
-                .update({ 
+                .update({
                     vapi_phone_id: phoneNumber.id,
-                    vapi_phone_number: phoneNumber.number || phoneNumber.id 
+                    vapi_phone_number: phoneNumber.number || phoneNumber.id
                 })
                 .eq('id', restaurant.id);
 
@@ -297,15 +314,15 @@ router.post('/verify-email', async (req: Request, res: Response) => {
                 message: `
           <h2>Welcome to TableNow!</h2>
           <p>Your AI phone assistant has been successfully set up and is ready to take calls.</p>
-          
+
           <div style="background: #f0f0f0; padding: 20px; margin: 20px 0; border-radius: 8px;">
             <h3>📞 Your AI Phone Number:</h3>
             <p style="font-size: 24px; font-weight: bold; color: #000;">${phoneNumber.number}</p>
-            
+
             <h3>📧 Your BCC Email for Zenchef/SevenRooms:</h3>
             <p style="font-size: 18px; font-weight: bold; color: #000;">${bccEmail}</p>
           </div>
-          
+
           <h3>Next Steps:</h3>
           <ol>
             <li>Add the BCC email to your Zenchef or SevenRooms booking notifications</li>
@@ -313,7 +330,7 @@ router.post('/verify-email', async (req: Request, res: Response) => {
             <li>Configure your settings in the dashboard</li>
             <li>Connect your Google Calendar (optional)</li>
           </ol>
-          
+
           <p>Your AI assistant is trained with your restaurant information and ready to:</p>
           <ul>
             <li>✅ Take reservations</li>
