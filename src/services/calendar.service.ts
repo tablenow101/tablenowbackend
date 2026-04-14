@@ -21,12 +21,13 @@ export class CalendarService {
     /**
      * Get authorization URL for Google Calendar
      */
-    getAuthUrl(): string {
+    getAuthUrl(state: string): string {
         const client = this.createClient();
         return client.generateAuthUrl({
             access_type: 'offline',
             prompt: 'consent',
-            scope: ['https://www.googleapis.com/auth/calendar']
+            scope: ['https://www.googleapis.com/auth/calendar'],
+            state
         });
     }
 
