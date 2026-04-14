@@ -437,7 +437,7 @@ async function checkAvailability(restaurantId: string, restaurant: any, params: 
 }
 
 /**
- * Create booking — uses reservations + atomic RPC
+ * Create booking — uses bookings table + atomic RPC
  */
 async function createBooking(restaurantId: string, restaurant: any, params: any) {
     const { guestName, guestEmail, guestPhone, date, time, partySize, specialRequests, service_id } = params;
@@ -463,31 +463,32 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
             return { success: false, message: 'Sorry, this slot just became unavailable. Please try another time.' };
         }
 
-        // Create reservation record
-        const { data: reservation, error: insertError } = await supabase
-            .from('reservations')
+        // Insert into bookings table
+        const { data: booking, error: insertError } = await supabase
+            .from('bookings')
             .insert({
                 restaurant_id: restaurantId,
                 service_id,
-                first_name: firstName,
-                last_name: lastName,
-                phone: guestPhone,
-                email: guestEmail || null,
-                covers,
-                occasion: specialRequests || null,
-                date,
-                time: normalizedTime,
-                service_type: serviceType
+                guest_name: guestName,
+                guest_phone: guestPhone,
+                guest_email: guestEmail || null,
+                party_size: covers,
+                special_requests: specialRequests || null,
+                booking_date: date,
+                booking_time: normalizedTime,
+                service_type: serviceType,
+                source: 'vapi',
+                status: 'confirmed'
             })
             .select()
             .single();
 
-        if (insertError || !reservation) {
+        if (insertError || !booking) {
             console.error('[create_booking] Insert error:', insertError);
             return { success: false, message: 'Failed to create reservation. Please try again.' };
         }
 
-        console.log(`✅ Reservation created: ${reservation.id}`);
+        console.log(`✅ Booking created: ${booking.id}`);
 
         // Non-blocking: Google Calendar
         if (restaurant.google_calendar_tokens) {
@@ -502,7 +503,7 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
                         start: startTime, end: endTime,
                         attendees: guestEmail ? [guestEmail] : []
                     });
-                    if (gCalEvent?.id) await supabase.from('reservations').update({ google_calendar_event_id: gCalEvent.id }).eq('id', reservation.id);
+                    if (gCalEvent?.id) await supabase.from('bookings').update({ google_calendar_event_id: gCalEvent.id }).eq('id', booking.id);
                 } catch (err: any) { console.error('[create_booking] Calendar:', err.message); }
             });
         }
@@ -511,8 +512,8 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
         if (guestEmail) {
             setImmediate(async () => {
                 try {
-                    await emailService.sendBookingConfirmation({ to: guestEmail, restaurantName: restaurant.name, guestName, date, time: normalizedTime || time, partySize: covers, confirmationNumber: reservation.id });
-                    await supabase.from('reservations').update({ confirmation_email_sent: true }).eq('id', reservation.id);
+                    await emailService.sendBookingConfirmation({ to: guestEmail, restaurantName: restaurant.name, guestName, date, time: normalizedTime || time, partySize: covers, confirmationNumber: booking.id });
+                    await supabase.from('bookings').update({ confirmation_email_sent: true }).eq('id', booking.id);
                 } catch (err: any) { console.error('[create_booking] Email:', err.message); }
             });
         }
@@ -529,7 +530,7 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
 
         return {
             success: true,
-            reservation_id: reservation.id,
+            reservation_id: booking.id,
             message: `Perfect! Your reservation is confirmed for ${covers} guest${covers > 1 ? 's' : ''} on ${date} at ${time}. ${guestEmail ? 'A confirmation email will be sent. ' : ''}We look forward to seeing you!`
         };
     } catch (err: any) {
