@@ -306,6 +306,18 @@ export class EmailService {
       throw error;
     }
   }
+
+  async sendRawEmail(options: {
+    to: string | string[];
+    subject: string;
+    html?: string;
+    text?: string;
+  }): Promise<void> {
+    await this.transporter.sendMail({
+      from: `TableNow <${this.fromEmail}>`,
+      ...options
+    });
+  }
 }
 
 export default new EmailService();
