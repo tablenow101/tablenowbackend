@@ -226,13 +226,30 @@ export async function createReservation(req: Request, res: Response): Promise<vo
                 .eq('id', restaurant_id)
                 .single();
 
-            const reservation = {
+            // Internal object used by calendar/email helpers (keeps original field names)
+            const reservationInfo = {
                 restaurant_id, service_id,
                 first_name, last_name, phone,
                 email: email || null,
                 covers: coversInt,
                 occasion: occasion || null,
                 date, time, service_type: serviceType
+            };
+
+            // DB record mapped to bookings table columns
+            const dbRecord = {
+                restaurant_id,
+                service_id,
+                guest_name: `${first_name} ${last_name}`.trim(),
+                guest_phone: phone,
+                guest_email: email || null,
+                party_size: coversInt,
+                special_requests: occasion || null,
+                booking_date: date,
+                booking_time: time,
+                service_type: serviceType,
+                source: 'phone',
+                status: 'confirmed'
             };
 
             const { error: updateError } = await supabase.rpc('increment_booked_covers', {
@@ -242,9 +259,9 @@ export async function createReservation(req: Request, res: Response): Promise<vo
 
             if (updateError) throw updateError;
 
-            const { data: newReservation, error: insertError } = await supabase
-                .from('reservations')
-                .insert(reservation)
+            const { data: newBooking, error: insertError } = await supabase
+                .from('bookings')
+                .insert(dbRecord)
                 .select()
                 .single();
 
@@ -253,9 +270,9 @@ export async function createReservation(req: Request, res: Response): Promise<vo
             // Étapes non-bloquantes après libération du verrou
             let calendarEventId: string | null = null;
             try {
-                calendarEventId = await createCalendarEvent(restaurant, reservation);
+                calendarEventId = await createCalendarEvent(restaurant, reservationInfo);
                 if (calendarEventId) {
-                    await supabase.from('reservations').update({ google_calendar_event_id: calendarEventId }).eq('id', newReservation.id);
+                    await supabase.from('bookings').update({ google_calendar_event_id: calendarEventId }).eq('id', newBooking.id);
                 }
             } catch (calendarErr: any) {
                 console.error('[create-reservation] Calendar error (non-bloquant):', calendarErr.message);
@@ -263,23 +280,23 @@ export async function createReservation(req: Request, res: Response): Promise<vo
 
             let emailSent = false;
             try {
-                emailSent = await sendConfirmationEmail(restaurant, reservation);
-                await supabase.from('reservations').update({ confirmation_email_sent: emailSent }).eq('id', newReservation.id);
+                emailSent = await sendConfirmationEmail(restaurant, reservationInfo);
+                await supabase.from('bookings').update({ confirmation_email_sent: emailSent }).eq('id', newBooking.id);
             } catch (emailErr: any) {
                 console.error('[create-reservation] Email error (non-bloquant):', emailErr.message);
             }
 
             let bccSent = false;
             try {
-                bccSent = await sendBccToPMS(restaurant, reservation);
-                await supabase.from('reservations').update({ bcc_email_sent: bccSent }).eq('id', newReservation.id);
+                bccSent = await sendBccToPMS(restaurant, reservationInfo);
+                await supabase.from('bookings').update({ bcc_email_sent: bccSent }).eq('id', newBooking.id);
             } catch (bccErr: any) {
                 console.error('[create-reservation] BCC error (non-bloquant):', bccErr.message);
             }
 
             return res.json({
                 success: true,
-                reservation_id: newReservation.id,
+                reservation_id: newBooking.id,
                 calendar_event_id: calendarEventId,
                 confirmation_email_sent: emailSent,
                 bcc_sent: bccSent,
