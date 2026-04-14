@@ -226,7 +226,27 @@ export async function createReservation(req: Request, res: Response): Promise<vo
                 .eq('id', restaurant_id)
                 .single();
 
-            // Internal object used by calendar/email helpers (keeps original field names)
+            // ── Find or create customer — phone is the unique identity key ──
+            let customerId: string | null = null;
+            {
+                const { data: existing } = await supabase
+                    .from('customers')
+                    .select('id')
+                    .eq('phone', phone)
+                    .single();
+                if (existing) {
+                    customerId = existing.id;
+                } else {
+                    const { data: created } = await supabase
+                        .from('customers')
+                        .insert({ phone, name: `${first_name} ${last_name}`.trim(), email: email || null })
+                        .select('id')
+                        .single();
+                    customerId = created?.id || null;
+                }
+            }
+
+            // Internal object used by calendar/email helpers
             const reservationInfo = {
                 restaurant_id, service_id,
                 first_name, last_name, phone,
@@ -240,6 +260,7 @@ export async function createReservation(req: Request, res: Response): Promise<vo
             const dbRecord = {
                 restaurant_id,
                 service_id,
+                customer_id: customerId,
                 guest_name: `${first_name} ${last_name}`.trim(),
                 guest_phone: phone,
                 guest_email: email || null,
@@ -266,6 +287,8 @@ export async function createReservation(req: Request, res: Response): Promise<vo
                 .single();
 
             if (insertError) throw insertError;
+
+            console.log(`✅ Booking: ${newBooking.id} — customer: ${customerId}`);
 
             // Étapes non-bloquantes après libération du verrou
             let calendarEventId: string | null = null;
