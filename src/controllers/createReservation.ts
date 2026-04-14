@@ -3,11 +3,10 @@
 // Appelé après confirmation verbale de l'agent
 // ============================================
 
-import { createClient } from '@supabase/supabase-js';
-import { google } from 'googleapis';
-import nodemailer from 'nodemailer';
 import { Request, Response } from 'express';
-import { getServiceType } from './checkAvailability';
+import supabase from '../config/supabase';
+import calendarService from '../services/calendar.service';
+import emailService from '../services/email.service';
 
 // ============================================
 // Verrou par restaurant (in-memory, VPS unique)
@@ -41,27 +40,10 @@ async function withRestaurantLock<T>(restaurantId: string, fn: () => Promise<T>)
     }
 }
 
-const supabase = createClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!
-);
-
-// Transporter Resend SMTP (même config que email.service.ts)
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.resend.com',
-    port: parseInt(process.env.SMTP_PORT || '465'),
-    secure: true,
-    auth: {
-        user: process.env.SMTP_USER || 'resend',
-        pass: process.env.SMTP_PASS
-    }
-});
-
 // ============================================
-// Google Calendar
+// Google Calendar — via calendarService centralisé
 // ============================================
 async function createCalendarEvent(restaurantData: any, reservation: any): Promise<string | null> {
-    // Parse des tokens depuis google_calendar_tokens (JSON stocké en base)
     if (!restaurantData.google_calendar_tokens) return null;
 
     let tokens: any;
@@ -75,24 +57,10 @@ async function createCalendarEvent(restaurantData: any, reservation: any): Promi
 
     if (!tokens?.access_token) return null;
 
-    const oauth2Client = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_REDIRECT_URI
-    );
-
-    oauth2Client.setCredentials({
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token
-    });
-
-    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-
     const startDate = new Date(`${reservation.date}T${reservation.time}:00`);
     const endDate = new Date(startDate.getTime() + 90 * 60 * 1000);
-    const endTime = endDate.toTimeString().slice(0, 5);
 
-    const event = {
+    const event = await calendarService.createEvent(tokens, {
         summary: `[TableNow] ${reservation.first_name} ${reservation.last_name} — ${reservation.covers} pers.`,
         description: [
             `📞 ${reservation.phone}`,
@@ -100,59 +68,34 @@ async function createCalendarEvent(restaurantData: any, reservation: any): Promi
             reservation.occasion ? `🎉 Occasion : ${reservation.occasion}` : '',
             `\nRéservation prise automatiquement via TableNow`
         ].filter(Boolean).join('\n'),
-        start: {
-            dateTime: `${reservation.date}T${reservation.time}:00`,
-            timeZone: 'Europe/Paris'
-        },
-        end: {
-            dateTime: `${reservation.date}T${endTime}:00`,
-            timeZone: 'Europe/Paris'
-        },
-        colorId: reservation.service_type === 'midi' ? '5' : '9'
-    };
-
-    const response = await calendar.events.insert({
-        calendarId: tokens.calendar_id || 'primary',
-        requestBody: event
+        start: startDate,
+        end: endDate,
+        attendees: reservation.email ? [reservation.email] : []
     });
 
-    return (response as any).data?.id || null;
+    return event?.id || null;
 }
 
 // ============================================
-// Email confirmation client (via Resend SMTP)
+// Email confirmation client (via emailService)
 // ============================================
 async function sendConfirmationEmail(restaurantData: any, reservation: any): Promise<boolean> {
     if (!reservation.email) return false;
 
-    const dateFormatted = new Date(reservation.date).toLocaleDateString('fr-FR', {
-        weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
-    });
-
-    await transporter.sendMail({
-        from: `${restaurantData.name} <${process.env.EMAIL_FROM || `info@${process.env.EMAIL_DOMAIN}`}>`,
+    await emailService.sendBookingConfirmation({
         to: reservation.email,
-        subject: `Confirmation de votre réservation — ${restaurantData.name}`,
-        html: `
-        <div style="font-family: Georgia, serif; max-width: 520px; margin: 0 auto; color: #1a1a1a;">
-            <h2 style="font-size: 22px; margin-bottom: 8px;">Réservation confirmée</h2>
-            <p style="color: #555; margin-bottom: 24px;">${restaurantData.name} vous attend.</p>
-            <table style="width: 100%; border-collapse: collapse;">
-                <tr><td style="padding: 10px 0; border-bottom: 1px solid #eee; color: #888; width: 140px;">Date</td><td style="padding: 10px 0; border-bottom: 1px solid #eee; font-weight: bold;">${dateFormatted}</td></tr>
-                <tr><td style="padding: 10px 0; border-bottom: 1px solid #eee; color: #888;">Heure</td><td style="padding: 10px 0; border-bottom: 1px solid #eee; font-weight: bold;">${reservation.time}</td></tr>
-                <tr><td style="padding: 10px 0; border-bottom: 1px solid #eee; color: #888;">Couverts</td><td style="padding: 10px 0; border-bottom: 1px solid #eee; font-weight: bold;">${reservation.covers} personne${reservation.covers > 1 ? 's' : ''}</td></tr>
-                <tr><td style="padding: 10px 0; border-bottom: 1px solid #eee; color: #888;">Nom</td><td style="padding: 10px 0; border-bottom: 1px solid #eee;">${reservation.first_name} ${reservation.last_name}</td></tr>
-                ${reservation.occasion ? `<tr><td style="padding: 10px 0; border-bottom: 1px solid #eee; color: #888;">Occasion</td><td style="padding: 10px 0; border-bottom: 1px solid #eee;">${reservation.occasion}</td></tr>` : ''}
-            </table>
-            <p style="margin-top: 24px; color: #555; font-size: 14px;">Pour modifier ou annuler, appelez le <strong>${restaurantData.phone}</strong>.</p>
-            <p style="margin-top: 32px; font-size: 12px; color: #aaa;">${restaurantData.name} · ${restaurantData.address || ''}</p>
-        </div>`
+        restaurantName: restaurantData.name,
+        guestName: `${reservation.first_name} ${reservation.last_name}`.trim(),
+        date: reservation.date,
+        time: reservation.time,
+        partySize: reservation.covers,
+        confirmationNumber: reservation.booking_id || ''
     });
     return true;
 }
 
 // ============================================
-// BCC vers le PMS du restaurant
+// BCC vers le PMS du restaurant (via emailService)
 // ============================================
 async function sendBccToPMS(restaurantData: any, reservation: any): Promise<boolean> {
     if (!restaurantData.pms_email) return false;
@@ -161,8 +104,7 @@ async function sendBccToPMS(restaurantData: any, reservation: any): Promise<bool
         weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
     });
 
-    await transporter.sendMail({
-        from: `TableNow — ${restaurantData.name} <${process.env.EMAIL_FROM || `info@${process.env.EMAIL_DOMAIN}`}>`,
+    await emailService.sendRawEmail({
         to: restaurantData.pms_email,
         subject: `Nouvelle réservation — ${reservation.first_name} ${reservation.last_name} — ${reservation.date} ${reservation.time}`,
         html: `
@@ -185,11 +127,11 @@ async function sendBccToPMS(restaurantData: any, reservation: any): Promise<bool
 // ============================================
 export async function createReservation(req: Request, res: Response): Promise<void> {
     const {
-        restaurant_id, service_id, first_name, last_name,
+        restaurant_id, first_name, last_name,
         phone, email, covers, occasion, date, time
     } = req.body;
 
-    const required: Record<string, any> = { restaurant_id, service_id, first_name, last_name, phone, covers, date, time };
+    const required: Record<string, any> = { restaurant_id, first_name, last_name, phone, covers, date, time };
     const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k);
 
     if (missing.length > 0) {
@@ -198,24 +140,31 @@ export async function createReservation(req: Request, res: Response): Promise<vo
     }
 
     const coversInt = parseInt(covers, 10);
-    const serviceType = getServiceType(time);
 
     const result = await withRestaurantLock(restaurant_id, async () => {
         try {
-            const { data: service, error: serviceError } = await supabase
-                .from('services')
-                .select('id, remaining_covers, is_closed')
-                .eq('id', service_id)
-                .single();
+            // Vérifier disponibilité via get_available_slots RPC
+            const { data: slots, error: slotError } = await supabase.rpc('get_available_slots', {
+                p_restaurant_id: restaurant_id,
+                p_date: date,
+                p_covers: coversInt
+            });
 
-            if (serviceError || !service) {
-                return res.status(404).json({ success: false, reason: 'service_not_found' });
-            }
-
-            if (service.is_closed || service.remaining_covers < coversInt) {
+            if (slotError || !slots || slots.length === 0) {
                 return res.status(409).json({
                     success: false,
                     reason: 'no_longer_available',
+                    agent_script: `Je suis vraiment désolé, il semblerait que ce créneau vienne juste d'être complet. Souhaitez-vous que je vous propose une autre date ?`
+                });
+            }
+
+            const targetSlot = (slots as any[]).find(s => s.slot_time.slice(0, 5) === time.slice(0, 5));
+
+            if (!targetSlot || !targetSlot.available) {
+                return res.status(409).json({
+                    success: false,
+                    reason: 'no_longer_available',
+                    remaining: targetSlot?.remaining || 0,
                     agent_script: `Je suis vraiment désolé, il semblerait que ce créneau vienne juste d'être complet. Souhaitez-vous que je vous propose une autre date ?`
                 });
             }
@@ -254,12 +203,13 @@ export async function createReservation(req: Request, res: Response): Promise<vo
 
             // Internal object used by calendar/email helpers
             const reservationInfo = {
-                restaurant_id, service_id,
+                restaurant_id,
                 first_name, last_name, phone,
                 email: email || null,
                 covers: coversInt,
                 occasion: occasion || null,
-                date, time
+                date, time,
+                booking_id: '' // set after insert
             };
 
             // Booking insert — new schema
@@ -281,6 +231,7 @@ export async function createReservation(req: Request, res: Response): Promise<vo
             if (insertError) throw insertError;
 
             console.log(`✅ Booking: ${newBooking.id} — customer: ${customerId}`);
+            reservationInfo.booking_id = newBooking.id;
 
             // Étapes non-bloquantes après libération du verrou
             let calendarEventId: string | null = null;
