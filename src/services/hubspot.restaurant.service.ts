@@ -29,7 +29,7 @@ async function hubspotRequest(method: string, path: string, body?: any) {
  */
 async function findCompany(name: string): Promise<string | null> {
     try {
-        const data = await hubspotRequest('POST', '/crm/v3/objects/companies/search', {
+        const data: any = await hubspotRequest('POST', '/crm/v3/objects/companies/search', {
             filterGroups: [{
                 filters: [{
                     propertyName: 'name',
@@ -89,7 +89,7 @@ export async function syncRestaurantToHubSpot(restaurantId: string): Promise<str
                 await hubspotRequest('PATCH', `/crm/v3/objects/companies/${companyId}`, { properties });
                 console.log(`[hubspot-sync] Found & updated company ${companyId} for ${restaurant.name}`);
             } else {
-                const created = await hubspotRequest('POST', '/crm/v3/objects/companies', { properties });
+                const created: any = await hubspotRequest('POST', '/crm/v3/objects/companies', { properties });
                 companyId = created.id;
                 console.log(`[hubspot-sync] Created company ${companyId} for ${restaurant.name}`);
             }
