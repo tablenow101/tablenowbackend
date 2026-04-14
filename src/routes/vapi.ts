@@ -437,13 +437,14 @@ async function createBooking(restaurantId: string, restaurant: any, params: any,
     }
 
     try {
-        // ── Find or create customer (phone is the unique key, prefer Twilio caller ID) ──
+        // ── Find or create customer — keyed by (restaurant_id, phone) ──
         const phoneKey = callerPhone || guestPhone;
         let customerId: string | null = null;
         if (phoneKey) {
             const { data: existing } = await supabase
                 .from('customers')
                 .select('id')
+                .eq('restaurant_id', restaurantId)
                 .eq('phone', phoneKey)
                 .single();
             if (existing) {
@@ -451,40 +452,26 @@ async function createBooking(restaurantId: string, restaurant: any, params: any,
             } else {
                 const { data: created } = await supabase
                     .from('customers')
-                    .insert({ phone: phoneKey, name: guestName || null, email: guestEmail || null })
+                    .insert({ restaurant_id: restaurantId, phone: phoneKey, name: guestName || null, email: guestEmail || null })
                     .select('id')
                     .single();
                 customerId = created?.id || null;
             }
         }
 
-        // ── Atomic increment — prevents double-booking race conditions ──
-        const { error: rpcError } = await supabase.rpc('increment_booked_covers', {
-            p_service_id: service_id,
-            p_covers: covers
-        });
-        if (rpcError) {
-            console.error('[create_booking] RPC error:', rpcError.message);
-            return { success: false, message: 'Sorry, this slot just became unavailable. Please try another time.' };
-        }
-
-        // ── Insert booking ──
+        // ── Insert booking — booked_for = ISO timestamp ──
+        const bookedFor = `${date}T${normalizedTime}:00`;
         const { data: booking, error: insertError } = await supabase
             .from('bookings')
             .insert({
                 restaurant_id: restaurantId,
-                service_id,
                 customer_id: customerId,
-                guest_name: guestName,
-                guest_phone: guestPhone,
-                guest_email: guestEmail || null,
-                party_size: covers,
+                booked_for: bookedFor,
+                covers,
                 special_requests: specialRequests || null,
-                booking_date: date,
-                booking_time: normalizedTime,
-                service_type: serviceType,
                 source: 'vapi',
-                status: 'confirmed'
+                status: 'confirmed',
+                call_id: null
             })
             .select()
             .single();
