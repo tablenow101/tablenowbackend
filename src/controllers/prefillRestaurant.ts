@@ -116,6 +116,46 @@ async function fetchGooglePlaces(googleMapsUrl: string): Promise<Partial<Prefill
     };
 }
 
+async function fetchByPlaceId(placeId: string): Promise<Partial<PrefillResult>> {
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY!;
+
+    const fieldMask = [
+        'displayName', 'formattedAddress', 'nationalPhoneNumber',
+        'websiteUri', 'regularOpeningHours', 'primaryTypeDisplayName',
+        'types', 'editorialSummary',
+    ].join(',');
+
+    const res = await axios.get(
+        `https://places.googleapis.com/v1/places/${placeId}`,
+        {
+            headers: {
+                'X-Goog-Api-Key': apiKey,
+                'X-Goog-FieldMask': fieldMask,
+                'Accept-Language': 'fr',
+            },
+        }
+    );
+
+    const place = res.data;
+    if (!place) throw new Error('Place not found');
+
+    const cuisineTypes = (place.types || [])
+        .filter((t: string) => !['establishment', 'point_of_interest', 'food', 'restaurant'].includes(t))
+        .map((t: string) => t.replace(/_/g, ' '))
+        .slice(0, 3);
+
+    return {
+        name:         place.displayName?.text,
+        address:      place.formattedAddress,
+        phone:        place.nationalPhoneNumber,
+        website:      place.websiteUri,
+        description:  place.editorialSummary?.text,
+        hours:        place.regularOpeningHours ? formatHoursNew(place.regularOpeningHours) : undefined,
+        cuisine_type: place.primaryTypeDisplayName?.text || cuisineTypes[0],
+        services:     cuisineTypes.length ? cuisineTypes : undefined,
+    };
+}
+
 function extractPhone(text: string): string | null {
     const match = text.match(/(?:\+33|0033|0)[1-9](?:[\s.\-]?\d{2}){4}/);
     return match ? match[0].trim() : null;
@@ -209,8 +249,63 @@ function merge(places: Partial<PrefillResult> | null, website: Partial<PrefillRe
     return result;
 }
 
+export async function autocompleteRestaurant(req: Request, res: Response) {
+    const { query } = req.body;
+    if (!query || query.length < 2) return res.json({ suggestions: [] });
+
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'GOOGLE_PLACES_API_KEY not set' });
+
+    try {
+        const response = await axios.post(
+            'https://places.googleapis.com/v1/places:autocomplete',
+            {
+                input: query,
+                languageCode: 'fr',
+                includedPrimaryTypes: ['restaurant', 'food', 'cafe', 'bar'],
+                locationBias: {
+                    rectangle: {
+                        low:  { latitude: 41.3, longitude: -5.1 },
+                        high: { latitude: 51.1, longitude:  9.6 },
+                    },
+                },
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Goog-Api-Key': apiKey,
+                },
+            }
+        );
+
+        const suggestions = (response.data?.suggestions || [])
+            .filter((s: any) => s.placePrediction)
+            .map((s: any) => ({
+                placeId: s.placePrediction.placeId,
+                name:    s.placePrediction.structuredFormat?.mainText?.text || s.placePrediction.text?.text,
+                address: s.placePrediction.structuredFormat?.secondaryText?.text || '',
+            }));
+
+        return res.json({ suggestions });
+    } catch (err: any) {
+        console.error('[Autocomplete Error]', err?.response?.data || err.message);
+        return res.json({ suggestions: [] });
+    }
+}
+
 export async function prefillRestaurant(req: Request, res: Response) {
-    const { google_maps_url, website_url } = req.body;
+    const { google_maps_url, website_url, place_id } = req.body;
+
+    // If place_id provided directly (from autocomplete selection), fetch details immediately
+    if (place_id && !google_maps_url) {
+        try {
+            const data = await fetchByPlaceId(place_id);
+            return res.json({ ...data, sources: ['google_places'] });
+        } catch (err: any) {
+            return res.status(422).json({ error: err.message });
+        }
+    }
+
     if (!google_maps_url && !website_url)
         return res.status(400).json({ error: 'Provide at least google_maps_url or website_url' });
 
