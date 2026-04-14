@@ -47,75 +47,126 @@ router.get('/', async (req: Request, res: Response) => {
     const availableSlots = (slots as any[]).filter(s => s.available);
 
     return res.json({
-        available: availableSlots.length > 0,
         date,
         covers: parseInt(covers, 10),
-        slots: slots,
-        available_slots: availableSlots,
-        // Script prêt pour l'agent vocal
-        agent_script: availableSlots.length > 0
-            ? `J'ai de la disponibilité le ${date} aux créneaux suivants : ${availableSlots.map(s => s.slot_time.slice(0, 5)).join(', ')}. Quel horaire vous convient ?`
-            : `Je suis désolé, nous n'avons plus de disponibilité pour ${covers} personne${parseInt(covers) > 1 ? 's' : ''} le ${date}. Souhaitez-vous que je vous propose une autre date ?`
+        available: availableSlots.length > 0,
+        slots: availableSlots.map(s => ({
+            time: s.slot_time.slice(0, 5),       // "12:00"
+            datetime: s.slot_datetime,
+            remaining: s.remaining,
+            max: s.max_covers
+        }))
+    });
+});
+
+// ──────────────────────────────────────────────
+// POST /api/availability/validate
+// Validation atomique juste avant de confirmer la résa.
+// Appelé par le voice agent EN DERNIER avant POST /api/bookings.
+// Body: { restaurant_id, datetime (ISO), covers }
+// ──────────────────────────────────────────────
+router.post('/validate', async (req: Request, res: Response) => {
+    const { restaurant_id, datetime, covers } = req.body;
+
+    if (!restaurant_id || !datetime || !covers) {
+        return res.status(400).json({ error: 'Champs manquants' });
+    }
+
+    const dt = new Date(datetime);
+    const date = dt.toISOString().slice(0, 10);
+    const hhmm = dt.toTimeString().slice(0, 5);
+
+    const { data: slots, error } = await supabase.rpc('get_available_slots', {
+        p_restaurant_id: restaurant_id,
+        p_date: date,
+        p_covers: parseInt(covers, 10)
+    });
+
+    if (error) return res.status(500).json({ error: 'Erreur serveur' });
+
+    const match = (slots as any[]).find(s => s.slot_time.slice(0, 5) === hhmm);
+
+    if (!match) {
+        return res.json({ valid: false, reason: 'Créneau inexistant pour ce restaurant' });
+    }
+
+    if (!match.available) {
+        return res.json({
+            valid: false,
+            reason: 'Complet',
+            remaining: match.remaining,
+            requested: covers
+        });
+    }
+
+    return res.json({
+        valid: true,
+        remaining: match.remaining,
+        datetime: match.slot_datetime
     });
 });
 
 // ──────────────────────────────────────────────
 // GET /api/availability/next
-// Prochain créneau disponible dans les 14 jours
-// Query: restaurant_id, covers
+// Prochain créneau libre à partir d'une date.
+// Query: restaurant_id, from (YYYY-MM-DD), covers, max_days (défaut 14)
 // ──────────────────────────────────────────────
 router.get('/next', async (req: Request, res: Response) => {
-    const { restaurant_id, covers = '2' } = req.query as Record<string, string>;
+    const { restaurant_id, from, covers = '2', max_days = '14' } = req.query as Record<string, string>;
 
-    if (!restaurant_id) {
-        return res.status(400).json({ error: 'restaurant_id requis' });
+    if (!restaurant_id || !from) {
+        return res.status(400).json({ error: 'restaurant_id et from sont requis' });
     }
 
-    const coversInt = parseInt(covers, 10);
+    const start = new Date(from);
+    const coversN = parseInt(covers, 10);
+    const maxDays = parseInt(max_days, 10);
 
-    for (let i = 1; i <= 14; i++) {
-        const d = new Date();
+    for (let i = 0; i < maxDays; i++) {
+        const d = new Date(start);
         d.setDate(d.getDate() + i);
-        const dateStr = d.toISOString().split('T')[0];
+        const date = d.toISOString().slice(0, 10);
 
-        // Check closed
+        // Vérifie jour fermé
         const { data: closed } = await supabase
             .from('closed_dates')
             .select('id')
             .eq('restaurant_id', restaurant_id)
-            .eq('closed_on', dateStr)
+            .eq('closed_on', date)
             .maybeSingle();
 
         if (closed) continue;
 
         const { data: slots } = await supabase.rpc('get_available_slots', {
             p_restaurant_id: restaurant_id,
-            p_date: dateStr,
-            p_covers: coversInt
+            p_date: date,
+            p_covers: coversN
         });
 
-        const availableSlots = (slots as any[] || []).filter(s => s.available);
-        if (availableSlots.length > 0) {
+        const first = (slots as any[] || []).find(s => s.available);
+
+        if (first) {
             return res.json({
-                date: dateStr,
-                available_slots: availableSlots,
-                agent_script: `La prochaine disponibilité pour ${coversInt} personne${coversInt > 1 ? 's' : ''} est le ${dateStr} à ${availableSlots[0].slot_time.slice(0, 5)}. Cela vous conviendrait-il ?`
+                found: true,
+                date,
+                time: first.slot_time.slice(0, 5),
+                datetime: first.slot_datetime,
+                remaining: first.remaining
             });
         }
     }
 
     return res.json({
-        date: null,
-        available_slots: [],
-        agent_script: `Je n'ai pas de disponibilité dans les 14 prochains jours pour ${coversInt} personne${coversInt > 1 ? 's' : ''}. Souhaitez-vous laisser vos coordonnées ?`
+        found: false,
+        message: `Aucun créneau disponible dans les ${maxDays} prochains jours.`
     });
 });
 
 // ──────────────────────────────────────────────
-// POST /api/bookings
-// Crée une réservation directe (web/dashboard)
-// Body: restaurant_id, phone, name, email?,
-//       booked_for (ISO), covers, special_requests?
+// POST /api/availability/bookings  (alias /api/bookings)
+// Crée une réservation directe (web/dashboard/manual)
+// Body: restaurant_id, phone, name?, email?,
+//       booked_for (ISO), covers, special_requests?, source?
 // ──────────────────────────────────────────────
 router.post('/bookings', async (req: Request, res: Response) => {
     const { restaurant_id, phone, name, email, booked_for, covers, special_requests, source = 'web' } = req.body;
@@ -144,22 +195,21 @@ router.post('/bookings', async (req: Request, res: Response) => {
             customer = created;
         }
 
-        // Vérifier disponibilité au créneau demandé
-        const bookedDate = new Date(booked_for).toISOString().split('T')[0];
+        // Validate slot availability
+        const bookedDate = booked_for.slice(0, 10);
+        const hhmm = new Date(booked_for).toTimeString().slice(0, 5);
         const { data: slots } = await supabase.rpc('get_available_slots', {
             p_restaurant_id: restaurant_id,
             p_date: bookedDate,
             p_covers: parseInt(covers, 10)
         });
 
-        const slotHHMM = new Date(booked_for).toTimeString().slice(0, 5);
-        const targetSlot = (slots as any[] || []).find(s => s.slot_time.slice(0, 5) === slotHHMM);
-
+        const targetSlot = (slots as any[] || []).find(s => s.slot_time.slice(0, 5) === hhmm);
         if (targetSlot && !targetSlot.available) {
             return res.status(409).json({ error: 'Créneau complet', remaining: targetSlot.remaining });
         }
 
-        // Créer la réservation
+        // Create booking
         const { data: booking, error: bErr } = await supabase
             .from('bookings')
             .insert({
@@ -178,7 +228,7 @@ router.post('/bookings', async (req: Request, res: Response) => {
 
         return res.json({ success: true, booking });
     } catch (err: any) {
-        console.error('[POST /bookings]', err);
+        console.error('[POST /availability/bookings]', err);
         return res.status(500).json({ error: err.message });
     }
 });
