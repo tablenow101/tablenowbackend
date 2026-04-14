@@ -20,20 +20,21 @@ router.delete('/bookings/:id', async (req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────
-// GET /api/customers?phone=+33612345678
-// Profil complet d'un convive + historique réservations
+// GET /api/customers?phone=+336...&restaurant_id=...
+// Profil complet d'un convive + historique
 // ─────────────────────────────────────────
 router.get('/customers', async (req: Request, res: Response) => {
-    const { phone } = req.query as { phone?: string };
+    const { phone, restaurant_id } = req.query as { phone?: string; restaurant_id?: string };
 
-    if (!phone) {
-        return res.status(400).json({ error: 'Paramètre phone requis' });
+    if (!phone || !restaurant_id) {
+        return res.status(400).json({ error: 'Paramètres phone et restaurant_id requis' });
     }
 
     const { data, error } = await supabase
         .from('customers')
         .select('*, bookings(*)')
         .eq('phone', phone)
+        .eq('restaurant_id', restaurant_id)
         .single();
 
     if (error || !data) return res.status(404).json({ error: 'Client introuvable' });
@@ -48,12 +49,11 @@ router.patch('/customers/:id', async (req: Request, res: Response) => {
     const { name, email, allergies, preferences, notes } = req.body;
 
     const updates: Record<string, any> = {};
-    if (name !== undefined)       updates.name = name;
-    if (email !== undefined)      updates.email = email;
-    if (allergies !== undefined)  updates.allergies = allergies;
+    if (name !== undefined)        updates.name = name;
+    if (email !== undefined)       updates.email = email;
+    if (allergies !== undefined)   updates.allergies = allergies;
     if (preferences !== undefined) updates.preferences = preferences;
-    if (notes !== undefined)      updates.notes = notes;
-    updates.updated_at = new Date().toISOString();
+    if (notes !== undefined)       updates.notes = notes;
 
     const { data, error } = await supabase
         .from('customers')
@@ -68,12 +68,10 @@ router.patch('/customers/:id', async (req: Request, res: Response) => {
 
 // ─────────────────────────────────────────
 // POST /api/internal/mark-noshows
-// Marquer no_show les réservations confirmées
-// dont l'heure est passée de plus de 30 min
-// Appelé par cron VPS toutes les heures
+// Marquer no_show — protégé par INTERNAL_SECRET
+// Cron VPS : 0 * * * *
 // ─────────────────────────────────────────
 router.post('/internal/mark-noshows', async (req: Request, res: Response) => {
-    // Simple secret check — not exposed to frontend
     const secret = req.headers['x-internal-secret'];
     if (secret !== process.env.INTERNAL_SECRET) {
         return res.status(401).json({ error: 'Unauthorized' });
