@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import supabase from '../config/supabase';
 import emailService from '../services/email.service';
-import hubspotService from '../services/hubspot.service';
 import ragService from '../services/rag.service';
 import twilioService from '../services/twilio.service';
 import vapiService from '../services/vapi.service';
@@ -231,6 +230,7 @@ async function handleCallEnded(event: any) {
  */
 async function handleFunctionCall(event: any, res: Response) {
     const { functionName, parameters, call } = event;
+    const callerPhone = call?.customer?.number;
 
     console.log(`Function call: ${functionName}`, parameters);
 
@@ -245,7 +245,7 @@ async function handleFunctionCall(event: any, res: Response) {
         return res.json({ error: 'Restaurant not found' });
     }
 
-    return res.json(await executeFunctionCall(functionName, restaurant, parameters));
+    return res.json(await executeFunctionCall(functionName, restaurant, parameters, callerPhone));
 }
 
 /**
@@ -358,7 +358,7 @@ async function handleToolCalls(event: any, res: Response) {
                 continue;
             }
 
-            const result = await executeFunctionCall(functionName, restaurant, params);
+            const result = await executeFunctionCall(functionName, restaurant, params, call?.customer?.number);
             toolResults.push({
                 toolCallId: tc.id,
                 result
@@ -383,12 +383,12 @@ async function handleToolCalls(event: any, res: Response) {
 /**
  * Shared executor for function calls
  */
-async function executeFunctionCall(functionName: string, restaurant: any, parameters: any) {
+async function executeFunctionCall(functionName: string, restaurant: any, parameters: any, callerPhone?: string) {
     switch (functionName) {
         case 'check_availability':
             return await checkAvailability(restaurant.id, restaurant, parameters);
         case 'create_booking':
-            return await createBooking(restaurant.id, restaurant, parameters);
+            return await createBooking(restaurant.id, restaurant, parameters, callerPhone);
         case 'update_booking':
             return await updateBooking(restaurant.id, restaurant, parameters);
         case 'cancel_booking':
@@ -437,13 +437,10 @@ async function checkAvailability(restaurantId: string, restaurant: any, params: 
 }
 
 /**
- * Create booking — uses bookings table + atomic RPC
+ * Create booking — find-or-create customer by caller ID, then insert into bookings
  */
-async function createBooking(restaurantId: string, restaurant: any, params: any) {
+async function createBooking(restaurantId: string, restaurant: any, params: any, callerPhone?: string) {
     const { guestName, guestEmail, guestPhone, date, time, partySize, specialRequests, service_id } = params;
-    const nameParts = (guestName || '').trim().split(/\s+/);
-    const firstName = nameParts[0] || guestName;
-    const lastName = nameParts.slice(1).join(' ') || '';
     const covers = parseInt(partySize, 10);
     const serviceType = getServiceType(String(time));
     const normalizedTime = normalizeTime(time);
@@ -453,7 +450,28 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
     }
 
     try {
-        // Atomic increment — prevents double-booking race conditions
+        // ── Find or create customer (phone is the unique key, prefer Twilio caller ID) ──
+        const phoneKey = callerPhone || guestPhone;
+        let customerId: string | null = null;
+        if (phoneKey) {
+            const { data: existing } = await supabase
+                .from('customers')
+                .select('id')
+                .eq('phone', phoneKey)
+                .single();
+            if (existing) {
+                customerId = existing.id;
+            } else {
+                const { data: created } = await supabase
+                    .from('customers')
+                    .insert({ phone: phoneKey, name: guestName || null, email: guestEmail || null })
+                    .select('id')
+                    .single();
+                customerId = created?.id || null;
+            }
+        }
+
+        // ── Atomic increment — prevents double-booking race conditions ──
         const { error: rpcError } = await supabase.rpc('increment_booked_covers', {
             p_service_id: service_id,
             p_covers: covers
@@ -463,12 +481,13 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
             return { success: false, message: 'Sorry, this slot just became unavailable. Please try another time.' };
         }
 
-        // Insert into bookings table
+        // ── Insert booking ──
         const { data: booking, error: insertError } = await supabase
             .from('bookings')
             .insert({
                 restaurant_id: restaurantId,
                 service_id,
+                customer_id: customerId,
                 guest_name: guestName,
                 guest_phone: guestPhone,
                 guest_email: guestEmail || null,
@@ -488,9 +507,9 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
             return { success: false, message: 'Failed to create reservation. Please try again.' };
         }
 
-        console.log(`✅ Booking created: ${booking.id}`);
+        console.log(`✅ Booking created: ${booking.id} — customer: ${customerId}`);
 
-        // Non-blocking: Google Calendar
+        // ── Non-blocking: Google Calendar ──
         if (restaurant.google_calendar_tokens) {
             setImmediate(async () => {
                 try {
@@ -508,23 +527,13 @@ async function createBooking(restaurantId: string, restaurant: any, params: any)
             });
         }
 
-        // Non-blocking: Email
+        // ── Non-blocking: Email ──
         if (guestEmail) {
             setImmediate(async () => {
                 try {
                     await emailService.sendBookingConfirmation({ to: guestEmail, restaurantName: restaurant.name, guestName, date, time: normalizedTime || time, partySize: covers, confirmationNumber: booking.id });
                     await supabase.from('bookings').update({ confirmation_email_sent: true }).eq('id', booking.id);
                 } catch (err: any) { console.error('[create_booking] Email:', err.message); }
-            });
-        }
-
-        // Non-blocking: HubSpot
-        if (guestEmail) {
-            setImmediate(async () => {
-                try {
-                    await hubspotService.upsertContact({ email: guestEmail, firstName, lastName, phone: guestPhone, restaurantName: restaurant.name });
-                    await hubspotService.createDeal({ dealName: `${restaurant.name} — ${guestName} — ${date}`, contactEmail: guestEmail, restaurantId, reservationDate: `${date} ${time}`, partySize: covers });
-                } catch (err: any) { console.error('[create_booking] HubSpot:', err.message); }
             });
         }
 
@@ -597,15 +606,6 @@ async function updateBooking(restaurantId: string, restaurant: any, params: any)
         }
     }
 
-    // Update HubSpot deal stage if available
-    if (booking.hubspot_deal_id) {
-        try {
-            await hubspotService.updateDealStatus(booking.hubspot_deal_id, 'confirmed');
-        } catch (hubspotError) {
-            console.error('HubSpot update error:', hubspotError);
-        }
-    }
-
     return {
         success: true,
         message: 'Your booking has been updated successfully.'
@@ -658,15 +658,6 @@ async function cancelBooking(restaurantId: string, restaurant: any, params: any)
             console.log('✅ Google Calendar event deleted');
         } catch (err) {
             console.error('⚠️ Google Calendar delete error:', err);
-        }
-    }
-
-    // Update HubSpot deal stage if available
-    if (booking.hubspot_deal_id) {
-        try {
-            await hubspotService.updateDealStatus(booking.hubspot_deal_id, 'cancelled');
-        } catch (hubspotError) {
-            console.error('HubSpot cancel error:', hubspotError);
         }
     }
 
