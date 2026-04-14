@@ -207,19 +207,6 @@ async function handleCallEnded(event: any) {
             console.error('Call log update error:', updateError);
         }
 
-        // Log activity in HubSpot
-        if (call?.customer?.email) {
-            try {
-                await hubspotService.logActivity({
-                    contactEmail: call.customer.email,
-                    activityType: 'call',
-                    subject: 'AI Phone Call',
-                    body: `Call duration: ${duration || 0}s\n\nTranscript:\n${finalTranscript || 'No transcript available'}`
-                });
-            } catch (error) {
-                console.error('HubSpot logging error:', error);
-            }
-        }
     } catch (error) {
         console.error('Call ended handling error:', error);
     }
