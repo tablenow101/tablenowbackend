@@ -37,7 +37,9 @@ const allowedOrigins = [
     'http://localhost:5174',
     'https://tablenowfrontend.vercel.app',
     'https://www.tablenowfrontend.vercel.app',
-    'https://app.tablenow.io'
+    'https://app.tablenow.io',
+    'https://tablenow.io',
+    'https://www.tablenow.io'
 ].filter(Boolean); // Remove any undefined values
 
 app.use(cors({
