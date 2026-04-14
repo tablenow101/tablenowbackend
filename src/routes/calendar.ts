@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import crypto from 'crypto';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import supabase from '../config/supabase';
 import calendarService from '../services/calendar.service';
@@ -10,7 +11,7 @@ const router = Router();
  * This must be public as Google doesn't allow auth headers in redirects
  */
 router.get('/callback', (req: any, res: Response) => {
-    const { code, error } = req.query;
+    const { code, error, state } = req.query;
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
     if (error) {
@@ -20,6 +21,16 @@ router.get('/callback', (req: any, res: Response) => {
     if (!code) {
         return res.redirect(`${frontendUrl}/settings?error=no_code`);
     }
+
+    // Verify CSRF state token
+    const cookieState = req.cookies?.oauth_state;
+    if (!state || !cookieState || state !== cookieState) {
+        console.error('OAuth state mismatch — possible CSRF', { state, cookieState });
+        return res.redirect(`${frontendUrl}/settings?error=state_mismatch`);
+    }
+
+    // Clear the state cookie
+    res.clearCookie('oauth_state');
 
     // Redirect to frontend with code, where it will be exchanged via POST
     res.redirect(`${frontendUrl}/settings?code=${code}`);
@@ -32,8 +43,18 @@ router.use(authenticateToken);
  */
 router.get('/auth-url', (req: AuthRequest, res: Response) => {
     try {
-        const authUrl = calendarService.getAuthUrl();
-        console.log('Generated Google Auth URL:', authUrl);
+        const state = crypto.randomBytes(32).toString('hex');
+
+        // Store state in httpOnly cookie (expires in 10 min)
+        res.cookie('oauth_state', state, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'lax',
+            maxAge: 10 * 60 * 1000
+        });
+
+        const authUrl = calendarService.getAuthUrl(state);
+        console.log('Generated Google Auth URL with state');
         res.json({ authUrl });
     } catch (error: any) {
         console.error('Get auth URL error:', error);
