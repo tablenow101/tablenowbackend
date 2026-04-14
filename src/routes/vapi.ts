@@ -9,10 +9,7 @@ import vapiService from '../services/vapi.service';
 const calendarService = require('../services/calendar.service').default;
 
 
-function getServiceType(timeStr: string): 'midi' | 'soir' {
-    const [hours] = timeStr.split(':').map(Number);
-    return hours < 15 ? 'midi' : 'soir';
-}
+// getServiceType removed — no longer needed with get_available_slots RPC
 
 const router = Router();
 
@@ -388,38 +385,69 @@ async function executeFunctionCall(functionName: string, restaurant: any, parame
 }
 
 /**
- * Check availability — uses services table (capacity-based)
+ * Check availability — uses get_available_slots RPC
  */
 async function checkAvailability(restaurantId: string, restaurant: any, params: any) {
     const { date, time, partySize } = params;
     const covers = parseInt(partySize, 10);
-    const serviceType = getServiceType(String(time));
-    console.log(`🔍 Checking [${serviceType}] ${restaurantId}: ${date} ${time} x${covers}`);
+    console.log(`🔍 Checking ${restaurantId}: ${date} ${time} x${covers} covers`);
 
     try {
-        const { data: service, error } = await supabase
-            .from('services')
-            .select('id, remaining_covers, is_closed')
+        // 1. Check if restaurant is closed this date
+        const { data: closed } = await supabase
+            .from('closed_dates')
+            .select('reason')
             .eq('restaurant_id', restaurantId)
-            .eq('date', date)
-            .eq('service_type', serviceType)
-            .single();
+            .eq('closed_on', date)
+            .maybeSingle();
 
-        if (error || !service) {
-            return { result: 'unavailable', message: `We don't have a ${serviceType} service on ${date}. Would you like another date?` };
-        }
-        if (service.is_closed) {
-            return { result: 'unavailable', message: `We are closed on ${date} for ${serviceType}. Would you like to try another date?` };
-        }
-        if (service.remaining_covers < covers) {
-            return { result: 'unavailable', message: `Sorry, we are fully booked for ${covers} guests on ${date} at ${time}. Would you like a different time?` };
+        if (closed) {
+            return {
+                result: 'unavailable',
+                message: `Je suis désolé, nous sommes fermés le ${date}. ${closed.reason ? '(' + closed.reason + ')' : 'Souhaitez-vous essayer une autre date ?'}`
+            };
         }
 
-        console.log(`✅ Available — service_id: ${service.id}`);
-        return { result: 'available', service_id: service.id, message: `Yes, we have availability for ${covers} guests on ${date} at ${time}.` };
+        // 2. Get available slots via RPC
+        const { data: slots, error } = await supabase.rpc('get_available_slots', {
+            p_restaurant_id: restaurantId,
+            p_date: date,
+            p_covers: covers
+        });
+
+        if (error) {
+            console.error('❌ get_available_slots error:', error);
+            return { result: 'error', message: 'Je ne peux pas vérifier la disponibilité en ce moment. Réessayez dans un instant.' };
+        }
+
+        // 3. Find slot matching the requested time
+        const slotMatch = (slots as any[] || []).find(s => s.slot_time.slice(0, 5) === time);
+
+        if (!slotMatch) {
+            return {
+                result: 'unavailable',
+                message: `Je suis désolé, nous ne sommes pas disponibles à ${time} le ${date}. Souhaitez-vous essayer une autre heure ?`
+            };
+        }
+
+        if (!slotMatch.available) {
+            return {
+                result: 'unavailable',
+                remaining: slotMatch.remaining,
+                message: `Je suis désolé, le créneau de ${time} est complet pour ${covers} personne${covers > 1 ? 's' : ''}. Nous n'avons que ${slotMatch.remaining} place${slotMatch.remaining > 1 ? 's' : ''} disponible. Souhaitez-vous un autre horaire ?`
+            };
+        }
+
+        console.log(`✅ Available at ${time} — ${slotMatch.remaining} covers remaining`);
+        return {
+            result: 'available',
+            booked_for: slotMatch.slot_datetime,
+            remaining: slotMatch.remaining,
+            message: `Parfait ! Nous avons de la disponibilité pour ${covers} personne${covers > 1 ? 's' : ''} le ${date} à ${time}. ${slotMatch.remaining} place${slotMatch.remaining > 1 ? 's' : ''} restante${slotMatch.remaining > 1 ? 's' : ''}.`
+        };
     } catch (err) {
         console.error('❌ Availability check failed:', err);
-        return { result: 'error', message: 'I cannot check availability right now. Please try again in a moment.' };
+        return { result: 'error', message: 'Je ne peux pas vérifier la disponibilité en ce moment. Réessayez dans un instant.' };
     }
 }
 
@@ -427,14 +455,9 @@ async function checkAvailability(restaurantId: string, restaurant: any, params: 
  * Create booking — find-or-create customer by caller ID, then insert into bookings
  */
 async function createBooking(restaurantId: string, restaurant: any, params: any, callerPhone?: string) {
-    const { guestName, guestEmail, guestPhone, date, time, partySize, specialRequests, service_id } = params;
+    const { guestName, guestEmail, guestPhone, date, time, partySize, specialRequests } = params;
     const covers = parseInt(partySize, 10);
-    const serviceType = getServiceType(String(time));
     const normalizedTime = normalizeTime(time);
-
-    if (!service_id) {
-        return { success: false, message: 'Please check availability first before creating a booking.' };
-    }
 
     try {
         // ── Find or create customer — keyed by (restaurant_id, phone) ──
@@ -478,7 +501,7 @@ async function createBooking(restaurantId: string, restaurant: any, params: any,
 
         if (insertError || !booking) {
             console.error('[create_booking] Insert error:', insertError);
-            return { success: false, message: 'Failed to create reservation. Please try again.' };
+            return { success: false, message: 'Impossible de créer la réservation. Veuillez réessayer.' };
         }
 
         console.log(`✅ Booking created: ${booking.id} — customer: ${customerId}`);
@@ -514,11 +537,11 @@ async function createBooking(restaurantId: string, restaurant: any, params: any,
         return {
             success: true,
             reservation_id: booking.id,
-            message: `Perfect! Your reservation is confirmed for ${covers} guest${covers > 1 ? 's' : ''} on ${date} at ${time}. ${guestEmail ? 'A confirmation email will be sent. ' : ''}We look forward to seeing you!`
+            message: `Parfait ! Votre réservation est confirmée pour ${covers} personne${covers > 1 ? 's' : ''} le ${date} à ${normalizedTime || time}. Votre numéro de confirmation est ${booking.id}. À très bientôt !`
         };
     } catch (err: any) {
         console.error('[create_booking] Critical error:', err);
-        return { success: false, message: 'Failed to create reservation due to a technical issue. Please call us directly.' };
+        return { success: false, message: 'Erreur technique lors de la création de la réservation. Veuillez nous appeler directement.' };
     }
 }
 
