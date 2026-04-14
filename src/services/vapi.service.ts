@@ -271,6 +271,7 @@ Remember: You represent this restaurant. Every call is an opportunity to make so
                     parameters: {
                         type: 'object',
                         properties: {
+                            service_id: { type: 'string', description: 'Service ID returned by check_availability — must be passed exactly as received' },
                             guestName: { type: 'string', description: 'Full name of the guest' },
                             guestEmail: { type: 'string', description: 'Email address' },
                             guestPhone: { type: 'string', description: 'Phone number' },
@@ -279,7 +280,7 @@ Remember: You represent this restaurant. Every call is an opportunity to make so
                             partySize: { type: 'number', description: 'Number of guests' },
                             specialRequests: { type: 'string', description: 'Any special requests or dietary needs' }
                         },
-                        required: ['guestName', 'guestPhone', 'date', 'time', 'partySize']
+                        required: ['service_id', 'guestName', 'guestPhone', 'date', 'time', 'partySize']
                     }
                 }
             },

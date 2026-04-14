@@ -113,10 +113,10 @@ async function createCalendarEvent(restaurantData: any, reservation: any): Promi
 
     const response = await calendar.events.insert({
         calendarId: tokens.calendar_id || 'primary',
-        resource: event
+        requestBody: event
     });
 
-    return response.data.id || null;
+    return (response as any).data?.id || null;
 }
 
 // ============================================

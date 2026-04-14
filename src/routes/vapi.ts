@@ -9,6 +9,12 @@ import vapiService from '../services/vapi.service';
 // Load Calendar Service dynamically to avoid circular deps if any
 const calendarService = require('../services/calendar.service').default;
 
+
+function getServiceType(timeStr: string): 'midi' | 'soir' {
+    const [hours] = timeStr.split(':').map(Number);
+    return hours < 15 ? 'midi' : 'soir';
+}
+
 const router = Router();
 
 /**
@@ -395,219 +401,141 @@ async function executeFunctionCall(functionName: string, restaurant: any, parame
 }
 
 /**
- * Check availability function
+ * Check availability — uses services table (capacity-based)
  */
 async function checkAvailability(restaurantId: string, restaurant: any, params: any) {
     const { date, time, partySize } = params;
-    console.log(`🔍 Checking availability for Restaurant ${restaurantId}:`, { date, time, partySize });
+    const covers = parseInt(partySize, 10);
+    const serviceType = getServiceType(String(time));
+    console.log(`🔍 Checking [${serviceType}] ${restaurantId}: ${date} ${time} x${covers}`);
 
     try {
-        let isAvailable = false;
-        let suggestionMessage = '';
-        let googleChecked = false;
+        const { data: service, error } = await supabase
+            .from('services')
+            .select('id, remaining_covers, is_closed')
+            .eq('restaurant_id', restaurantId)
+            .eq('date', date)
+            .eq('service_type', serviceType)
+            .single();
 
-        // 1. Check Google Calendar (Priority)
-        if (restaurant.google_calendar_tokens) {
-            console.log('📅 Using Google Calendar for availability check...');
-            try {
-                const tokens = JSON.parse(restaurant.google_calendar_tokens);
-                const startTime = new Date(`${date}T${time}:00`);
-                const endTime = new Date(startTime.getTime() + 60 * 60 * 1000); // Assume 1 hour default
-
-                // Check specific slot
-                isAvailable = await calendarService.checkAvailability(tokens, startTime, endTime);
-                googleChecked = true;
-
-                if (!isAvailable) {
-                    console.log('❌ Slot busy in Google Calendar. Finding alternatives...');
-                    const suggestions = await calendarService.findAvailableSlots(tokens, new Date(date));
-
-                    if (suggestions.length > 0) {
-                        const topSuggestions = suggestions.slice(0, 3).join(', ');
-                        suggestionMessage = `Sorry, that time is taken. However, we have availability at: ${topSuggestions}.`;
-                    } else {
-                        suggestionMessage = `Sorry, we are fully booked on ${date}.`;
-                    }
-                }
-            } catch (err) {
-                console.error('⚠️ Google Calendar check failed, falling back to local DB:', err);
-                // Fallback to local DB check logic below
-            }
+        if (error || !service) {
+            return { result: 'unavailable', message: `We don't have a ${serviceType} service on ${date}. Would you like another date?` };
+        }
+        if (service.is_closed) {
+            return { result: 'unavailable', message: `We are closed on ${date} for ${serviceType}. Would you like to try another date?` };
+        }
+        if (service.remaining_covers < covers) {
+            return { result: 'unavailable', message: `Sorry, we are fully booked for ${covers} guests on ${date} at ${time}. Would you like a different time?` };
         }
 
-        // 2. Fallback: Local Database Check (if GCal failed or not connected)
-        if (!googleChecked) {
-            const { data: bookings } = await supabase
-                .from('bookings')
-                .select('party_size')
-                .eq('restaurant_id', restaurantId)
-                .eq('booking_date', date)
-                .eq('booking_time', time)
-                .eq('status', 'confirmed');
-
-            const totalBooked = bookings?.reduce((sum, b) => sum + b.party_size, 0) || 0;
-            isAvailable = (restaurant.capacity || 50) - totalBooked >= partySize;
-        }
-
-        // 3. Construct Result
-        const result = {
-            result: isAvailable ? 'available' : 'unavailable',
-            message: isAvailable
-                ? `Yes, we have availability for ${partySize} guests on ${date} at ${time}.`
-                : (suggestionMessage || `Sorry, we don't have availability for ${partySize} guests at that time.`)
-        };
-
-        console.log('✅ Availability check result:', result);
-        return result;
-
-    } catch (error) {
-        console.error('❌ Availability check failed:', error);
-        return {
-            result: 'error',
-            message: 'I am sorry, I cannot check availability right now due to a technical issue.'
-        };
+        console.log(`✅ Available — service_id: ${service.id}`);
+        return { result: 'available', service_id: service.id, message: `Yes, we have availability for ${covers} guests on ${date} at ${time}.` };
+    } catch (err) {
+        console.error('❌ Availability check failed:', err);
+        return { result: 'error', message: 'I cannot check availability right now. Please try again in a moment.' };
     }
 }
 
 /**
- * Create booking function
+ * Create booking — uses reservations + atomic RPC
  */
 async function createBooking(restaurantId: string, restaurant: any, params: any) {
-    const { guestName, guestEmail, guestPhone, date, time, partySize, specialRequests } = params;
-
+    const { guestName, guestEmail, guestPhone, date, time, partySize, specialRequests, service_id } = params;
+    const nameParts = (guestName || '').trim().split(/\s+/);
+    const firstName = nameParts[0] || guestName;
+    const lastName = nameParts.slice(1).join(' ') || '';
+    const covers = parseInt(partySize, 10);
+    const serviceType = getServiceType(String(time));
     const normalizedTime = normalizeTime(time);
 
-    const confirmationNumber = `TN-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
-
-    // 1. Create Booking in Database
-    const { data: booking, error } = await supabase
-        .from('bookings')
-        .insert({
-            restaurant_id: restaurantId,
-            guest_name: guestName,
-            guest_email: guestEmail,
-            guest_phone: guestPhone,
-            booking_date: date,
-            booking_time: normalizedTime,
-            party_size: partySize,
-            special_requests: specialRequests,
-            confirmation_number: confirmationNumber,
-            status: 'confirmed',
-            source: 'phone'
-        })
-        .select()
-        .single();
-
-    if (error) {
-        return { success: false, message: 'Failed to create booking. Please try again.' };
+    if (!service_id) {
+        return { success: false, message: 'Please check availability first before creating a booking.' };
     }
 
-    // 2. Create Event in Google Calendar (Real-time Sync)
-    if (restaurant.google_calendar_tokens) {
-        try {
-            console.log('📅 Creating Google Calendar event...');
-            const tokens = JSON.parse(restaurant.google_calendar_tokens);
-            const startTime = new Date(`${date}T${normalizedTime}:00`);
-            const endTime = new Date(startTime.getTime() + 90 * 60000); // 90 mins duration
-
-            const gCalEvent = await calendarService.createEvent(tokens, {
-                summary: `Reservation: ${guestName} (${partySize} ppl)`,
-                description: `Phone: ${guestPhone}\nEmail: ${guestEmail}\nSpecial Requests: ${specialRequests || 'None'}\nConfirmation: ${confirmationNumber}`,
-                start: startTime,
-                end: endTime,
-                attendees: guestEmail ? [guestEmail] : []
-            });
-
-            // Update booking with Google Event ID
-            await supabase
-                .from('bookings')
-                .update({ calendar_event_id: gCalEvent.id })
-                .eq('id', booking.id);
-
-            console.log('✅ Google Calendar event created:', gCalEvent.id);
-        } catch (calendarError) {
-            console.error('⚠️ Google Calendar error:', calendarError);
+    try {
+        // Atomic increment — prevents double-booking race conditions
+        const { error: rpcError } = await supabase.rpc('increment_booked_covers', {
+            p_service_id: service_id,
+            p_covers: covers
+        });
+        if (rpcError) {
+            console.error('[create_booking] RPC error:', rpcError.message);
+            return { success: false, message: 'Sorry, this slot just became unavailable. Please try another time.' };
         }
-    }
 
-    // 3. Send Emails & Notifications (Previous Logic)
-    if (guestEmail) {
-        try {
-            await emailService.sendBookingConfirmation({
-                to: guestEmail,
-                restaurantName: restaurant.name || 'Restaurant',
-                guestName,
-                date,
-                time,
-                partySize,
-                confirmationNumber
-            });
-        } catch (emailErr) {
-            console.error('⚠️ Failed to send booking confirmation email:', emailErr);
-        }
-    }
-
-    if (restaurant.email) {
-        try {
-            await emailService.sendRestaurantNotification({
-                to: restaurant.email,
-                subject: 'New Phone Booking',
-                message: `${guestName} booked a table for ${partySize} on ${date} at ${time}. Special requests: ${specialRequests || 'None'}. Confirmation: ${confirmationNumber}. Source: Phone.`,
-                bookingDetails: booking
-            });
-        } catch (emailErr) {
-            console.error('⚠️ Failed to send restaurant notification email:', emailErr);
-        }
-    }
-
-    // Send SMS notification to restaurant if they have a VAPI number and a phone number
-    if (restaurant.phone && restaurant.vapi_phone_number && twilioService.isConfigured()) {
-        try {
-            const message = `TableNow AI: New booking via phone! ${guestName} for ${partySize} guests on ${date} at ${time}. Confirmation: ${confirmationNumber}`;
-            await twilioService.sendSms(restaurant.phone, restaurant.vapi_phone_number, message);
-            console.log(`SMS notification sent to ${restaurant.phone}`);
-        } catch (smsError) {
-            console.error('Failed to send SMS notification:', smsError);
-            // Don't fail the booking if SMS fails
-        }
-    }
-
-    // Create HubSpot contact and deal
-    if (guestEmail) {
-        try {
-            await hubspotService.upsertContact({
-                email: guestEmail,
-                firstName: guestName.split(' ')[0],
-                lastName: guestName.split(' ').slice(1).join(' '),
+        // Create reservation record
+        const { data: reservation, error: insertError } = await supabase
+            .from('reservations')
+            .insert({
+                restaurant_id: restaurantId,
+                service_id,
+                first_name: firstName,
+                last_name: lastName,
                 phone: guestPhone,
-                restaurantName: restaurant?.name
-            });
+                email: guestEmail || null,
+                covers,
+                occasion: specialRequests || null,
+                date,
+                time: normalizedTime,
+                service_type: serviceType
+            })
+            .select()
+            .single();
 
-            const deal = await hubspotService.createDeal({
-                dealName: `${restaurant?.name} - ${guestName} - ${date}`,
-                contactEmail: guestEmail,
-                restaurantId,
-                reservationDate: `${date} ${time}`,
-                partySize
-            });
-
-            // Persist HubSpot deal id for lifecycle updates
-            if (deal?.id) {
-                await supabase
-                    .from('bookings')
-                    .update({ hubspot_deal_id: deal.id })
-                    .eq('id', booking.id);
-            }
-        } catch (error) {
-            console.error('HubSpot error:', error);
+        if (insertError || !reservation) {
+            console.error('[create_booking] Insert error:', insertError);
+            return { success: false, message: 'Failed to create reservation. Please try again.' };
         }
-    }
 
-    return {
-        success: true,
-        confirmationNumber,
-        message: `Perfect! Your reservation is confirmed for ${partySize} guests on ${date} at ${time}. Your confirmation number is ${confirmationNumber}. ${guestEmail ? 'A confirmation email has been sent to you.' : ''}`
-    };
+        console.log(`✅ Reservation created: ${reservation.id}`);
+
+        // Non-blocking: Google Calendar
+        if (restaurant.google_calendar_tokens) {
+            setImmediate(async () => {
+                try {
+                    const tokens = JSON.parse(restaurant.google_calendar_tokens);
+                    const startTime = new Date(`${date}T${normalizedTime}:00`);
+                    const endTime = new Date(startTime.getTime() + 90 * 60000);
+                    const gCalEvent = await calendarService.createEvent(tokens, {
+                        summary: `[TableNow] ${guestName} — ${covers} pers.`,
+                        description: `📞 ${guestPhone}\n${guestEmail ? '📧 ' + guestEmail : ''}\n${specialRequests || ''}`,
+                        start: startTime, end: endTime,
+                        attendees: guestEmail ? [guestEmail] : []
+                    });
+                    if (gCalEvent?.id) await supabase.from('reservations').update({ google_calendar_event_id: gCalEvent.id }).eq('id', reservation.id);
+                } catch (err: any) { console.error('[create_booking] Calendar:', err.message); }
+            });
+        }
+
+        // Non-blocking: Email
+        if (guestEmail) {
+            setImmediate(async () => {
+                try {
+                    await emailService.sendBookingConfirmation({ to: guestEmail, restaurantName: restaurant.name, guestName, date, time: normalizedTime || time, partySize: covers, confirmationNumber: reservation.id });
+                    await supabase.from('reservations').update({ confirmation_email_sent: true }).eq('id', reservation.id);
+                } catch (err: any) { console.error('[create_booking] Email:', err.message); }
+            });
+        }
+
+        // Non-blocking: HubSpot
+        if (guestEmail) {
+            setImmediate(async () => {
+                try {
+                    await hubspotService.upsertContact({ email: guestEmail, firstName, lastName, phone: guestPhone, restaurantName: restaurant.name });
+                    await hubspotService.createDeal({ dealName: `${restaurant.name} — ${guestName} — ${date}`, contactEmail: guestEmail, restaurantId, reservationDate: `${date} ${time}`, partySize: covers });
+                } catch (err: any) { console.error('[create_booking] HubSpot:', err.message); }
+            });
+        }
+
+        return {
+            success: true,
+            reservation_id: reservation.id,
+            message: `Perfect! Your reservation is confirmed for ${covers} guest${covers > 1 ? 's' : ''} on ${date} at ${time}. ${guestEmail ? 'A confirmation email will be sent. ' : ''}We look forward to seeing you!`
+        };
+    } catch (err: any) {
+        console.error('[create_booking] Critical error:', err);
+        return { success: false, message: 'Failed to create reservation due to a technical issue. Please call us directly.' };
+    }
 }
 
 /**

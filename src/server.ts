@@ -18,6 +18,8 @@ import vapiRoutes from './routes/vapi';
 import emailRoutes from './routes/email';
 import calendarRoutes from './routes/calendar';
 import settingsRoutes from './routes/settings';
+import { checkAvailability } from './controllers/checkAvailability';
+import { createReservation } from './controllers/createReservation';
 
 const app: Application = express();
 const PORT = process.env.PORT || 5000;
@@ -32,7 +34,8 @@ const allowedOrigins = [
     'http://localhost:5173',
     'http://localhost:5174',
     'https://tablenowfrontend.vercel.app',
-    'https://www.tablenowfrontend.vercel.app'
+    'https://www.tablenowfrontend.vercel.app',
+    'https://app.tablenow.io'
 ].filter(Boolean); // Remove any undefined values
 
 app.use(cors({
@@ -72,6 +75,10 @@ app.use('/api/vapi', vapiRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/calendar', calendarRoutes);
 app.use('/api/settings', settingsRoutes);
+
+// VAPI Webhook routes (top-level, no rate limiting)
+app.post('/check-availability', checkAvailability);
+app.post('/create-reservation', createReservation);
 
 // Error handling middleware
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
