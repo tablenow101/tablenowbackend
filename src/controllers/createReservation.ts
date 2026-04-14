@@ -226,12 +226,13 @@ export async function createReservation(req: Request, res: Response): Promise<vo
                 .eq('id', restaurant_id)
                 .single();
 
-            // ── Find or create customer — phone is the unique identity key ──
+            // ── Find or create customer — keyed by (restaurant_id, phone) ──
             let customerId: string | null = null;
             {
                 const { data: existing } = await supabase
                     .from('customers')
                     .select('id')
+                    .eq('restaurant_id', restaurant_id)
                     .eq('phone', phone)
                     .single();
                 if (existing) {
@@ -239,7 +240,12 @@ export async function createReservation(req: Request, res: Response): Promise<vo
                 } else {
                     const { data: created } = await supabase
                         .from('customers')
-                        .insert({ phone, name: `${first_name} ${last_name}`.trim(), email: email || null })
+                        .insert({
+                            restaurant_id,
+                            phone,
+                            name: `${first_name} ${last_name}`.trim(),
+                            email: email || null
+                        })
                         .select('id')
                         .single();
                     customerId = created?.id || null;
@@ -253,36 +259,22 @@ export async function createReservation(req: Request, res: Response): Promise<vo
                 email: email || null,
                 covers: coversInt,
                 occasion: occasion || null,
-                date, time, service_type: serviceType
+                date, time
             };
 
-            // DB record mapped to bookings table columns
-            const dbRecord = {
-                restaurant_id,
-                service_id,
-                customer_id: customerId,
-                guest_name: `${first_name} ${last_name}`.trim(),
-                guest_phone: phone,
-                guest_email: email || null,
-                party_size: coversInt,
-                special_requests: occasion || null,
-                booking_date: date,
-                booking_time: time,
-                service_type: serviceType,
-                source: 'phone',
-                status: 'confirmed'
-            };
-
-            const { error: updateError } = await supabase.rpc('increment_booked_covers', {
-                p_service_id: service_id,
-                p_covers: coversInt
-            });
-
-            if (updateError) throw updateError;
-
+            // Booking insert — new schema
+            const bookedFor = `${date}T${time}:00`;
             const { data: newBooking, error: insertError } = await supabase
                 .from('bookings')
-                .insert(dbRecord)
+                .insert({
+                    restaurant_id,
+                    customer_id: customerId,
+                    booked_for: bookedFor,
+                    covers: coversInt,
+                    special_requests: occasion || null,
+                    source: 'phone',
+                    status: 'confirmed'
+                })
                 .select()
                 .single();
 
