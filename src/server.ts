@@ -21,6 +21,7 @@ import availabilityRoutes from './routes/availability';
 import emailRoutes from './routes/email';
 import calendarRoutes from './routes/calendar';
 import settingsRoutes from './routes/settings';
+import prefillRouter from './routes/prefill.route';
 import { checkAvailability } from './controllers/checkAvailability';
 import { createReservation } from './controllers/createReservation';
 
@@ -85,6 +86,7 @@ app.use('/api/availability', availabilityRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/calendar', calendarRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use(prefillRouter);
 
 // VAPI Webhook routes (top-level, no rate limiting)
 app.post('/check-availability', checkAvailability);
