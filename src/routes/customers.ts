@@ -80,7 +80,7 @@ router.post('/internal/mark-noshows', async (req: Request, res: Response) => {
     const { data, error } = await supabase.rpc('mark_noshows');
     if (error) return res.status(500).json({ error: error.message });
 
-    const count = (data as any)?.count ?? 0;
+    const count = typeof data === 'number' ? data : 0;
     console.log(`[no-show cron] ${count} réservations marquées no_show`);
     res.json({ marked: count });
 });
