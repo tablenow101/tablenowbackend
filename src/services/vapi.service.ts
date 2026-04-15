@@ -194,25 +194,8 @@ export class VapiService {
         const phone = restaurantData.phone || '';
         const maxCovers = restaurantData.max_covers || restaurantData.max_party_size || 10;
 
-        // Format opening hours from JSONB
-        let openingHoursText = '';
-        if (restaurantData.opening_hours && typeof restaurantData.opening_hours === 'object') {
-            const dayLabels: Record<string, string> = {
-                monday: 'Lundi', tuesday: 'Mardi', wednesday: 'Mercredi',
-                thursday: 'Jeudi', friday: 'Vendredi', saturday: 'Samedi', sunday: 'Dimanche'
-            };
-            const lines: string[] = [];
-            for (const [day, val] of Object.entries(restaurantData.opening_hours)) {
-                const d = val as any;
-                const label = dayLabels[day] || day;
-                if (d && d.open) {
-                    lines.push(`${label} : ${d.from} - ${d.to}`);
-                } else {
-                    lines.push(`${label} : Fermé`);
-                }
-            }
-            openingHoursText = lines.join('\n');
-        }
+        // Format opening hours from JSONB — ordered monday→sunday
+        const openingHoursText = this.formatOpeningHours(restaurantData.opening_hours);
 
         return `Tu es l'assistante téléphonique du restaurant ${name}. Tu t'appelles Clara. Tu parles exclusivement en français avec un ton chaleureux et professionnel. Tu vouvoies toujours les clients.
 
@@ -340,26 +323,18 @@ RÈGLES ABSOLUES :
     }
 
     /**
-     * Format opening hours JSONB into readable text for dynamic injection
+     * Format opening hours JSONB into readable text — ordered lundi→dimanche
      */
     public formatOpeningHours(openingHours: any): string {
         if (!openingHours || typeof openingHours !== 'object') return '';
 
-        const dayLabels: Record<string, string> = {
-            monday: 'Lundi', tuesday: 'Mardi', wednesday: 'Mercredi',
-            thursday: 'Jeudi', friday: 'Vendredi', saturday: 'Samedi', sunday: 'Dimanche'
-        };
-        const lines: string[] = [];
-        for (const [day, val] of Object.entries(openingHours)) {
-            const d = val as any;
-            const label = dayLabels[day] || day;
-            if (d && d.open) {
-                lines.push(`${label} : ${d.from} - ${d.to}`);
-            } else {
-                lines.push(`${label} : Fermé`);
-            }
-        }
-        return lines.join('\n');
+        const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+        const dayNames = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
+
+        return days.map((d, i) => {
+            const h = openingHours[d];
+            return h?.open ? `${dayNames[i]}: ${h.from}–${h.to}` : `${dayNames[i]}: fermé`;
+        }).join(', ');
     }
 
     async deletePhoneNumber(phoneNumberId: string): Promise<void> {
