@@ -45,12 +45,11 @@ router.post('/webhook', async (req: Request, res: Response) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /assistant-config — Dynamic variable injection per call
-// VAPI calls this on each incoming call to get restaurant-specific config
+// VAPI calls this on each incoming call to fill {{variable}} placeholders
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/assistant-config', async (req: Request, res: Response) => {
     try {
-        const { message } = req.body;
-        const phoneNumber = message?.call?.phoneNumber?.number || message?.call?.to;
+        const phoneNumber = req.body?.message?.call?.to;
 
         console.log('📞 assistant-config request for phone:', phoneNumber);
 
@@ -60,7 +59,7 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
 
         const { data: restaurant } = await supabase
             .from('restaurants')
-            .select('id, name, address, phone, opening_hours, vapi_phone_number, max_covers, max_party_size')
+            .select('id, name, address, phone, opening_hours')
             .eq('vapi_phone_number', phoneNumber)
             .single();
 
@@ -70,32 +69,17 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
         }
 
         const openingHoursFormatted = vapiService.formatOpeningHours(restaurant.opening_hours);
-        const maxCovers = restaurant.max_covers || restaurant.max_party_size || 10;
 
-        // Inject current date/time for temporal awareness
-        const now = new Date();
-        const currentDate = now.toISOString().split('T')[0];
-        const currentTime = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', hour12: false });
-        const dayOfWeek = now.toLocaleDateString('fr-FR', { weekday: 'long' });
-
-        console.log(`✅ assistant-config: ${restaurant.name} — ${currentDate} (${dayOfWeek}) ${currentTime}`);
-
-        // Build the full system prompt with restaurant data + live date/time
-        const basePrompt = vapiService.generateSystemPrompt(restaurant);
-        const dynamicContext = `\n\nDONNÉES EN TEMPS RÉEL (NE PAS IGNORER) :\n- Date du jour : ${currentDate} (${dayOfWeek})\n- Heure actuelle : ${currentTime}\n- ID du restaurant : ${restaurant.id}\n\nUtilise ces informations pour résoudre les termes relatifs comme "demain", "ce soir", "vendredi prochain". L'année est ${now.getFullYear()}.`;
+        console.log(`✅ assistant-config: ${restaurant.name}`);
 
         res.json({
             assistant: {
-                model: {
-                    systemPrompt: basePrompt + dynamicContext
-                },
                 variableValues: {
                     restaurantName: restaurant.name,
                     address: restaurant.address || '',
                     humanPhone: restaurant.phone || '',
                     openingHours: openingHoursFormatted,
-                    restaurantId: restaurant.id,
-                    maxCovers: String(maxCovers)
+                    restaurantId: restaurant.id
                 }
             }
         });
@@ -542,13 +526,20 @@ async function handleAssistantRequest(event: any, res: Response) {
 
     console.log(`Injecting dynamic prompt for ${restaurant.name}:`, { currentDate, currentTime, dayOfWeek });
 
-    const basePrompt = vapiService.generateSystemPrompt(restaurant);
+    const basePrompt = vapiService.generateSystemPrompt();
     const dynamicContext = `\n\nDONNÉES EN TEMPS RÉEL (NE PAS IGNORER) :\n- Date du jour : ${currentDate} (${dayOfWeek})\n- Heure actuelle : ${currentTime}\n- ID du restaurant : ${restaurant.id}\n\nUtilise ces informations pour résoudre les termes relatifs comme "demain", "ce soir", "vendredi prochain". L'année est ${now.getFullYear()}.`;
 
     return res.json({
         assistant: {
             model: {
                 systemPrompt: basePrompt + dynamicContext
+            },
+            variableValues: {
+                restaurantName: restaurant.name,
+                address: restaurant.address || '',
+                humanPhone: restaurant.phone || '',
+                openingHours: vapiService.formatOpeningHours(restaurant.opening_hours),
+                restaurantId: restaurant.id
             }
         }
     });
