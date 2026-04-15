@@ -7,6 +7,23 @@ const calendarService = require('../services/calendar.service').default;
 
 const router = Router();
 
+/**
+ * Resolve restaurant_id: accepts UUID or slug, returns UUID or null
+ */
+async function resolveRestaurantId(idOrSlug: string): Promise<string | null> {
+    // UUID pattern check
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrSlug);
+
+    if (isUuid) {
+        const { data } = await supabase.from('restaurants').select('id').eq('id', idOrSlug).single();
+        return data?.id || null;
+    }
+
+    // Try slug lookup
+    const { data } = await supabase.from('restaurants').select('id').eq('slug', idOrSlug).single();
+    return data?.id || null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // VAPI webhook handler for call events
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,103 +107,108 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /check-availability — Direct VAPI tool endpoint
+// POST /check-availability — VAPI tool endpoint
+// Accepts both direct flat body AND VAPI tool-call wrapper format
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/check-availability', async (req: Request, res: Response) => {
     try {
+        // Extract params: flat body OR VAPI tool-call wrapper
         const { message } = req.body;
         const toolCall = message?.toolCallList?.[0] || message?.toolCalls?.[0];
+        let restaurantId: string, date: string, time: string, covers: number;
 
-        if (!toolCall) {
-            return res.status(400).json({ error: 'No tool call in request' });
+        if (toolCall) {
+            const rawArgs = toolCall.function?.arguments || toolCall.parameters || '{}';
+            const params = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
+            restaurantId = params.restaurant_id;
+            date = params.date;
+            time = params.time;
+            covers = parseInt(params.covers || params.partySize, 10);
+        } else {
+            restaurantId = req.body.restaurant_id;
+            date = req.body.date;
+            time = req.body.time;
+            covers = parseInt(req.body.covers, 10);
         }
 
-        const rawArgs = toolCall.function?.arguments || toolCall.parameters || '{}';
-        const params = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
+        if (!restaurantId || !date || !time || !covers) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
 
-        const restaurantId = params.restaurant_id;
-        const date = params.date;
-        const time = params.time;
-        const covers = parseInt(params.covers || params.partySize, 10);
+        // Resolve slug to UUID if needed
+        const resolvedId = await resolveRestaurantId(restaurantId);
+        if (!resolvedId) {
+            const payload = { available: false, message: 'Restaurant non trouvé.' };
+            return toolCall
+                ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+                : res.status(404).json(payload);
+        }
 
-        console.log(`🔍 check-availability: ${restaurantId} — ${date} ${time} x${covers}`);
+        console.log(`🔍 check-availability: ${resolvedId} — ${date} ${time} x${covers}`);
 
         // Check closed dates
         const { data: closed } = await supabase
             .from('closed_dates')
             .select('reason')
-            .eq('restaurant_id', restaurantId)
+            .eq('restaurant_id', resolvedId)
             .eq('closed_on', date)
             .maybeSingle();
 
         if (closed) {
-            return res.json({
-                results: [{
-                    toolCallId: toolCall.id,
-                    result: JSON.stringify({
-                        result: 'unavailable',
-                        message: `Le restaurant est fermé le ${date}. ${closed.reason || 'Souhaitez-vous essayer une autre date ?'}`
-                    })
-                }]
-            });
+            const payload = {
+                available: false,
+                message: `Le restaurant est fermé le ${date}. ${closed.reason || 'Souhaitez-vous essayer une autre date ?'}`
+            };
+            return toolCall
+                ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+                : res.json(payload);
         }
 
         // Get available slots via RPC
         const { data: slots, error } = await supabase.rpc('get_available_slots', {
-            p_restaurant_id: restaurantId,
+            p_restaurant_id: resolvedId,
             p_date: date,
             p_covers: covers
         });
 
         if (error) {
             console.error('❌ get_available_slots error:', error);
-            return res.json({
-                results: [{
-                    toolCallId: toolCall.id,
-                    result: JSON.stringify({ result: 'error', message: 'Impossible de vérifier la disponibilité.' })
-                }]
-            });
+            const payload = { available: false, message: 'Impossible de vérifier la disponibilité.' };
+            return toolCall
+                ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+                : res.status(500).json(payload);
         }
 
         const slotMatch = (slots as any[] || []).find(s => s.slot_time?.slice(0, 5) === time);
 
-        if (!slotMatch) {
-            return res.json({
-                results: [{
-                    toolCallId: toolCall.id,
-                    result: JSON.stringify({
-                        result: 'unavailable',
-                        message: `Pas de disponibilité à ${time} le ${date}. Souhaitez-vous essayer une autre heure ?`
-                    })
-                }]
-            });
-        }
+        if (!slotMatch || !slotMatch.available) {
+            // Find 2 alternative slots (same day, available)
+            const alternatives = (slots as any[] || [])
+                .filter(s => s.available)
+                .map(s => s.slot_time?.slice(0, 5))
+                .filter(Boolean)
+                .slice(0, 2);
 
-        if (!slotMatch.available) {
-            return res.json({
-                results: [{
-                    toolCallId: toolCall.id,
-                    result: JSON.stringify({
-                        result: 'unavailable',
-                        remaining: slotMatch.remaining,
-                        message: `Le créneau de ${time} est complet pour ${covers} personne${covers > 1 ? 's' : ''}. ${slotMatch.remaining} place${slotMatch.remaining > 1 ? 's' : ''} restante${slotMatch.remaining > 1 ? 's' : ''}.`
-                    })
-                }]
-            });
+            const payload = {
+                available: false,
+                message: slotMatch
+                    ? `Le créneau de ${time} est complet pour ${covers} personne${covers > 1 ? 's' : ''}.`
+                    : `Pas de disponibilité à ${time} le ${date}.`,
+                alternatives
+            };
+            return toolCall
+                ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+                : res.json(payload);
         }
 
         console.log(`✅ Available at ${time} — ${slotMatch.remaining} remaining`);
-        res.json({
-            results: [{
-                toolCallId: toolCall.id,
-                result: JSON.stringify({
-                    result: 'available',
-                    booked_for: slotMatch.slot_datetime,
-                    remaining: slotMatch.remaining,
-                    message: `Disponibilité confirmée pour ${covers} personne${covers > 1 ? 's' : ''} le ${date} à ${time}.`
-                })
-            }]
-        });
+        const payload = {
+            available: true,
+            message: `Le créneau du ${date} à ${time} pour ${covers} personne${covers > 1 ? 's' : ''} est disponible.`
+        };
+        return toolCall
+            ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+            : res.json(payload);
     } catch (error: any) {
         console.error('❌ check-availability error:', error);
         res.status(500).json({ error: 'Availability check failed' });
@@ -194,46 +216,68 @@ router.post('/check-availability', async (req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /create-booking — Direct VAPI tool endpoint
+// POST /create-booking — VAPI tool endpoint
+// Accepts both direct flat body AND VAPI tool-call wrapper format
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/create-booking', async (req: Request, res: Response) => {
     try {
+        // Extract params: flat body OR VAPI tool-call wrapper
         const { message } = req.body;
         const toolCall = message?.toolCallList?.[0] || message?.toolCalls?.[0];
         const callerPhone = message?.call?.customer?.number;
+        let restaurantId: string, date: string, time: string, covers: number;
+        let firstName: string, lastName: string, guestPhone: string, guestEmail: string;
 
-        if (!toolCall) {
-            return res.status(400).json({ error: 'No tool call in request' });
+        if (toolCall) {
+            const rawArgs = toolCall.function?.arguments || toolCall.parameters || '{}';
+            const params = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
+            restaurantId = params.restaurant_id;
+            date = params.date;
+            time = params.time;
+            covers = parseInt(params.covers || params.partySize, 10);
+            firstName = params.first_name || '';
+            lastName = params.last_name || '';
+            guestPhone = params.phone || params.guestPhone || callerPhone || '';
+            guestEmail = params.email || params.guestEmail || '';
+        } else {
+            restaurantId = req.body.restaurant_id;
+            date = req.body.date;
+            time = req.body.time;
+            covers = parseInt(req.body.covers, 10);
+            firstName = req.body.first_name || '';
+            lastName = req.body.last_name || '';
+            guestPhone = req.body.phone || '';
+            guestEmail = req.body.email || '';
         }
 
-        const rawArgs = toolCall.function?.arguments || toolCall.parameters || '{}';
-        const params = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
+        if (!restaurantId || !date || !time || !covers || !firstName || !lastName || !guestPhone) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
 
-        const restaurantId = params.restaurant_id;
-        const date = params.date;
-        const time = params.time;
-        const covers = parseInt(params.covers || params.partySize, 10);
-        const firstName = params.first_name || '';
-        const lastName = params.last_name || '';
-        const guestName = `${firstName} ${lastName}`.trim() || params.guestName || 'Client';
-        const guestPhone = params.phone || params.guestPhone || callerPhone || '';
-        const guestEmail = params.email || params.guestEmail || '';
+        const guestName = `${firstName} ${lastName}`.trim();
 
-        console.log(`📝 create-booking: ${restaurantId} — ${guestName} ${date} ${time} x${covers}`);
+        // Resolve slug to UUID if needed
+        const resolvedId = await resolveRestaurantId(restaurantId);
+        if (!resolvedId) {
+            const payload = { success: false, message: 'Restaurant non trouvé.' };
+            return toolCall
+                ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+                : res.status(404).json(payload);
+        }
+
+        console.log(`📝 create-booking: ${resolvedId} — ${guestName} ${date} ${time} x${covers}`);
 
         const { data: restaurant } = await supabase
             .from('restaurants')
             .select('*')
-            .eq('id', restaurantId)
+            .eq('id', resolvedId)
             .single();
 
         if (!restaurant) {
-            return res.json({
-                results: [{
-                    toolCallId: toolCall.id,
-                    result: JSON.stringify({ success: false, message: 'Restaurant non trouvé.' })
-                }]
-            });
+            const payload = { success: false, message: 'Restaurant non trouvé.' };
+            return toolCall
+                ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+                : res.status(404).json(payload);
         }
 
         // Find or create customer
@@ -242,7 +286,7 @@ router.post('/create-booking', async (req: Request, res: Response) => {
             const { data: existing } = await supabase
                 .from('customers')
                 .select('id')
-                .eq('restaurant_id', restaurantId)
+                .eq('restaurant_id', resolvedId)
                 .eq('phone', guestPhone)
                 .single();
             if (existing) {
@@ -250,7 +294,7 @@ router.post('/create-booking', async (req: Request, res: Response) => {
             } else {
                 const { data: created } = await supabase
                     .from('customers')
-                    .insert({ restaurant_id: restaurantId, phone: guestPhone, name: guestName, email: guestEmail || null })
+                    .insert({ restaurant_id: resolvedId, phone: guestPhone, name: guestName, email: guestEmail || null })
                     .select('id')
                     .single();
                 customerId = created?.id || null;
@@ -264,11 +308,11 @@ router.post('/create-booking', async (req: Request, res: Response) => {
         const { data: booking, error: insertError } = await supabase
             .from('bookings')
             .insert({
-                restaurant_id: restaurantId,
+                restaurant_id: resolvedId,
                 customer_id: customerId,
                 booked_for: bookedFor,
                 covers,
-                source: 'vapi',
+                source: 'phone',
                 status: 'confirmed',
                 call_id: null
             })
@@ -277,12 +321,10 @@ router.post('/create-booking', async (req: Request, res: Response) => {
 
         if (insertError || !booking) {
             console.error('[create-booking] Insert error:', insertError);
-            return res.json({
-                results: [{
-                    toolCallId: toolCall.id,
-                    result: JSON.stringify({ success: false, message: 'Impossible de créer la réservation.' })
-                }]
-            });
+            const payload = { success: false, message: 'Erreur lors de la création de la réservation.' };
+            return toolCall
+                ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+                : res.status(500).json(payload);
         }
 
         console.log(`✅ Booking created: ${booking.id}`);
@@ -318,19 +360,17 @@ router.post('/create-booking', async (req: Request, res: Response) => {
             });
         }
 
-        res.json({
-            results: [{
-                toolCallId: toolCall.id,
-                result: JSON.stringify({
-                    success: true,
-                    reservation_id: booking.id,
-                    message: `Réservation confirmée pour ${covers} personne${covers > 1 ? 's' : ''} le ${date} à ${normalizedTime} au nom de ${guestName}.`
-                })
-            }]
-        });
+        const payload = {
+            success: true,
+            booking_id: booking.id,
+            message: `Réservation confirmée pour ${firstName} ${lastName}, le ${date} à ${normalizedTime} pour ${covers} personne${covers > 1 ? 's' : ''}.`
+        };
+        return toolCall
+            ? res.json({ results: [{ toolCallId: toolCall.id, result: JSON.stringify(payload) }] })
+            : res.json(payload);
     } catch (error: any) {
         console.error('❌ create-booking error:', error);
-        res.status(500).json({ error: 'Booking creation failed' });
+        res.status(500).json({ success: false, message: 'Erreur lors de la création de la réservation.' });
     }
 });
 
