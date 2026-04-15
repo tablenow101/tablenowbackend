@@ -86,7 +86,7 @@ export class VapiService {
                     firstMessage,
                     endCallMessage: 'Au revoir, bonne journée !',
                     serverUrl,
-                    silenceTimeoutSeconds: 8,
+                    silenceTimeoutSeconds: 10,
                     maxDurationSeconds: 600,
                     backgroundDenoisingEnabled: true,
                     responseDelaySeconds: 0.5,
