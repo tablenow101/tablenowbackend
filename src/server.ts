@@ -88,7 +88,11 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use(prefillRouter);
 
-// VAPI Webhook routes (top-level, no rate limiting)
+// VAPI tool endpoints at /vapi/* (no /api prefix, no rate limiting)
+// Tools use: /vapi/check-availability, /vapi/create-booking, /vapi/assistant-config
+app.use('/vapi', vapiRoutes);
+
+// Legacy VAPI Webhook routes (top-level, no rate limiting)
 app.post('/check-availability', checkAvailability);
 app.post('/create-reservation', createReservation);
 
