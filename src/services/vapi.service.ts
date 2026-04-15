@@ -30,7 +30,7 @@ export class VapiService {
             if (availableNumber) {
                 console.log(`📞 Available REAL number found: ${availableNumber.number} (ID: ${availableNumber.id})`);
 
-                const serverUrl = this.getServerUrl();
+                const serverUrl = `${process.env.BACKEND_URL}/vapi/assistant-config`;
                 await axios.patch(
                     `${VAPI_BASE_URL}/phone-number/${availableNumber.id}`,
                     { serverUrl },
@@ -52,12 +52,12 @@ export class VapiService {
 
     /**
      * Create AI assistant for restaurant — Clara persona, French-only
+     * System prompt uses {{variable}} placeholders filled by /vapi/assistant-config
      */
     async createAssistant(restaurantData: any): Promise<any> {
         try {
             const serverUrl = this.getServerUrl();
-            const systemPrompt = this.generateSystemPrompt(restaurantData);
-            const firstMessage = `Bonjour, restaurant ${restaurantData.name}, Clara à votre service, comment puis-je vous aider ?`;
+            const systemPrompt = this.generateSystemPrompt();
 
             console.log(`🚀 Creating VAPI Assistant for ${restaurantData.name}...`);
             console.log(`🌍 Webhook URL: ${serverUrl}`);
@@ -74,7 +74,7 @@ export class VapiService {
                     model: {
                         provider: 'openai',
                         model: 'gpt-4o',
-                        temperature: 0.3,
+                        temperature: 0.25,
                         maxTokens: 150,
                         systemPrompt,
                         tools: this.generateTools()
@@ -83,7 +83,7 @@ export class VapiService {
                         provider: 'azure',
                         voiceId: 'fr-FR-DeniseNeural'
                     },
-                    firstMessage,
+                    firstMessage: 'Bonjour, restaurant {{restaurantName}}, Clara à votre service, comment puis-je vous aider ?',
                     endCallMessage: 'Au revoir, bonne journée !',
                     serverUrl,
                     silenceTimeoutSeconds: 10,
@@ -104,17 +104,17 @@ export class VapiService {
     }
 
     /**
-     * Update assistant with new restaurant data
+     * Update assistant config
      */
     async updateAssistant(assistantId: string, restaurantData: any): Promise<any> {
         try {
-            const systemPrompt = this.generateSystemPrompt(restaurantData);
+            const systemPrompt = this.generateSystemPrompt();
             const serverUrl = this.getServerUrl();
-            const firstMessage = `Bonjour, restaurant ${restaurantData.name}, Clara à votre service, comment puis-je vous aider ?`;
 
             console.log(`🔄 Updating VAPI Assistant ${assistantId}...`);
 
             const payload = {
+                name: `${restaurantData.name} — Clara`,
                 transcriber: {
                     provider: 'deepgram',
                     model: 'nova-2',
@@ -123,7 +123,7 @@ export class VapiService {
                 model: {
                     provider: 'openai',
                     model: 'gpt-4o',
-                    temperature: 0.3,
+                    temperature: 0.25,
                     maxTokens: 150,
                     systemPrompt,
                     tools: this.generateTools()
@@ -132,10 +132,10 @@ export class VapiService {
                     provider: 'azure',
                     voiceId: 'fr-FR-DeniseNeural'
                 },
-                firstMessage,
+                firstMessage: 'Bonjour, restaurant {{restaurantName}}, Clara à votre service, comment puis-je vous aider ?',
                 endCallMessage: 'Au revoir, bonne journée !',
                 serverUrl,
-                silenceTimeoutSeconds: 8,
+                silenceTimeoutSeconds: 10,
                 maxDurationSeconds: 600,
                 backgroundDenoisingEnabled: true,
                 responseDelaySeconds: 0.5
@@ -171,7 +171,7 @@ export class VapiService {
 
     async linkAssistantToPhone(phoneNumberId: string, assistantId: string): Promise<any> {
         try {
-            const serverUrl = this.getServerUrl();
+            const serverUrl = `${process.env.BACKEND_URL}/vapi/assistant-config`;
             const response = await axios.patch(
                 `${VAPI_BASE_URL}/phone-number/${phoneNumberId}`,
                 { assistantId, serverUrl },
@@ -186,26 +186,20 @@ export class VapiService {
     }
 
     /**
-     * Generate system prompt — Clara, French-only, strict reservation flow
+     * Generate system prompt template with {{variable}} placeholders.
+     * Variables are filled dynamically by /vapi/assistant-config on each call.
      */
-    public generateSystemPrompt(restaurantData: any): string {
-        const name = restaurantData.name || 'le restaurant';
-        const address = restaurantData.address || '';
-        const phone = restaurantData.phone || '';
-        const maxCovers = restaurantData.max_covers || restaurantData.max_party_size || 10;
-
-        // Format opening hours from JSONB — ordered monday→sunday
-        const openingHoursText = this.formatOpeningHours(restaurantData.opening_hours);
-
-        return `Tu es l'assistante téléphonique du restaurant ${name}. Tu t'appelles Clara. Tu parles exclusivement en français avec un ton chaleureux et professionnel. Tu vouvoies toujours les clients.
+    public generateSystemPrompt(): string {
+        return `Tu es l'assistante téléphonique du restaurant {{restaurantName}}. Tu t'appelles Clara. Tu parles exclusivement en français avec un ton chaleureux et professionnel. Tu vouvoies toujours les clients.
 
 TON UNIQUE RÔLE : prendre des réservations par téléphone. Tu ne fais rien d'autre.
 
 INFORMATIONS DU RESTAURANT :
-- Nom : ${name}
-${address ? `- Adresse : ${address}` : ''}
-${phone ? `- Téléphone direct : ${phone}` : ''}
-${openingHoursText ? `- Horaires :\n${openingHoursText}` : ''}
+- Nom : {{restaurantName}}
+- Adresse : {{address}}
+- Téléphone direct : {{humanPhone}}
+- Horaires : {{openingHours}}
+- ID restaurant (pour les outils) : {{restaurantId}}
 
 ---
 
@@ -224,7 +218,7 @@ FLUX DE RÉSERVATION — SUIVRE CET ORDRE EXACT :
 Ne passe jamais à la question suivante sans avoir obtenu une réponse claire.
 
 Étape 2 — Vérifier la disponibilité :
-Appelle check_availability avec : date, heure, nombre de couverts.
+Appelle check_availability avec : restaurant_id = {{restaurantId}}, date, heure, nombre de couverts.
 → Disponible → passe à l'étape 3.
 → Complet → "Je suis désolée, ce créneau est complet. Puis-je vous proposer [créneau alt 1] ou [créneau alt 2] ?"
 → Aucune alternative → "Nous n'avons plus de disponibilité ce jour-là. Souhaitez-vous une autre date ?"
@@ -235,7 +229,7 @@ Appelle check_availability avec : date, heure, nombre de couverts.
 → Client corrige → modifier et refaire le récapitulatif complet.
 
 Étape 4 — Créer la réservation :
-Appelle create_booking avec toutes les informations collectées.
+Appelle create_booking avec restaurant_id = {{restaurantId}} et toutes les informations collectées.
 Annonce : "Parfait, votre réservation est confirmée ! Vous recevrez un email de confirmation. Nous nous réjouissons de vous accueillir. Au revoir !"
 
 ---
@@ -246,10 +240,10 @@ Hors horaires d'ouverture :
 "Le restaurant est actuellement fermé. Nos horaires sont : [horaires]. N'hésitez pas à rappeler."
 
 Modification ou annulation :
-${phone ? `"Pour une modification ou une annulation, merci de rappeler directement le restaurant au ${phone}."` : '"Pour une modification ou une annulation, merci de contacter directement le restaurant."'}
+"Pour une modification ou une annulation, merci de rappeler directement le restaurant au {{humanPhone}}."
 
 Question sur le menu, les prix, l'adresse :
-Répondre avec les infos du contexte si disponibles. Sinon : ${phone ? `"Pour cette question, contactez le restaurant au ${phone}."` : '"Pour cette question, contactez directement le restaurant."'}
+Répondre avec les infos du contexte si disponibles. Sinon : "Pour cette question, contactez le restaurant au {{humanPhone}}."
 
 Nom difficile à comprendre :
 "Pourriez-vous épeler votre nom, s'il vous plaît ?"
@@ -265,7 +259,7 @@ RÈGLES ABSOLUES :
 - Jamais de disponibilité annoncée sans check_availability
 - Jamais de réservation créée sans confirmation explicite du client à l'étape 3
 - En cas de doute → demander, ne jamais assumer
-- Pour les groupes de plus de ${maxCovers} personnes → ${phone ? `"Pour les grands groupes, contactez-nous directement au ${phone}."` : '"Pour les grands groupes, contactez-nous directement."'}`;
+- Pour les grands groupes → "Pour les grands groupes, contactez-nous directement au {{humanPhone}}."`;
     }
 
     /**
@@ -328,12 +322,14 @@ RÈGLES ABSOLUES :
     public formatOpeningHours(openingHours: any): string {
         if (!openingHours || typeof openingHours !== 'object') return '';
 
-        const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-        const dayNames = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
+        const map: Record<string, string> = {
+            monday: 'lundi', tuesday: 'mardi', wednesday: 'mercredi',
+            thursday: 'jeudi', friday: 'vendredi', saturday: 'samedi', sunday: 'dimanche'
+        };
 
-        return days.map((d, i) => {
-            const h = openingHours[d];
-            return h?.open ? `${dayNames[i]}: ${h.from}–${h.to}` : `${dayNames[i]}: fermé`;
+        return Object.entries(map).map(([key, label]) => {
+            const h = openingHours[key];
+            return h?.open ? `${label}: ${h.from}–${h.to}` : `${label}: fermé`;
         }).join(', ');
     }
 
