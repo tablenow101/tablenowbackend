@@ -436,6 +436,23 @@ async function handleCallEnded(event: any) {
     let startedAt = event.startedAt || call?.startedAt;
     let endedAt = event.endedAt || call?.endedAt;
 
+    // Extraction Structured Outputs VAPI
+    const structuredOutputs = event.artifact?.structuredOutputs || {};
+    const soValues = Object.values(structuredOutputs) as any[];
+
+    const getSOByKey = (key: string) => {
+        const entry = Object.entries(structuredOutputs).find(([k]) => k.toLowerCase().includes(key));
+        return entry ? entry[1] : null;
+    };
+
+    const reservationBooked = soValues.find(v => typeof v === 'boolean' && v !== null) ?? null;
+    const bookingDetails = soValues.find(v => typeof v === 'object' && v !== null && !Array.isArray(v)) ?? null;
+    const appointmentDate = bookingDetails?.date ?? null;
+    const appointmentTime = bookingDetails?.time ?? null;
+    const callSummary = soValues.find(v => typeof v === 'string' && v.length > 20) ?? null;
+    const successEvaluation = soValues.find(v => typeof v === 'boolean') ?? null;
+    const customerSentiment = soValues.find(v => ['positive','neutral','negative'].includes(v)) ?? null;
+
     if (!duration && startedAt && endedAt) {
         const start = new Date(startedAt).getTime();
         const end = new Date(endedAt).getTime();
@@ -457,7 +474,16 @@ async function handleCallEnded(event: any) {
                 duration,
                 transcript: finalTranscript,
                 recording_url: finalRecordingUrl,
-                ended_at: endedAt || new Date().toISOString()
+                ended_at: endedAt || new Date().toISOString(),
+                // ✅ Structured Outputs
+                reservation_booked: reservationBooked,
+                booking_details: bookingDetails,
+                appointment_date: appointmentDate,
+                appointment_time: appointmentTime,
+                call_summary: callSummary,
+                success_evaluation: successEvaluation,
+                customer_sentiment: customerSentiment,
+                raw_payload: event
             })
             .eq('call_id', callId)
             .select('id, restaurant_id');
@@ -494,7 +520,16 @@ async function handleCallEnded(event: any) {
                     transcript: finalTranscript,
                     recording_url: finalRecordingUrl,
                     started_at: finalStartedAt,
-                    ended_at: endedAt || new Date().toISOString()
+                    ended_at: endedAt || new Date().toISOString(),
+                    // ✅ Structured Outputs
+                    reservation_booked: reservationBooked,
+                    booking_details: bookingDetails,
+                    appointment_date: appointmentDate,
+                    appointment_time: appointmentTime,
+                    call_summary: callSummary,
+                    success_evaluation: successEvaluation,
+                    customer_sentiment: customerSentiment,
+                    raw_payload: event
                 });
 
                 if (insertError) console.error('Call log insert error:', insertError);
