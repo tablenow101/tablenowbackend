@@ -13,20 +13,51 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
         const restaurantId = req.user!.restaurantId;
         const { startDate, endDate } = req.query;
 
-        // Get total bookings
+        // Fetch bookings — join customers for VAPI-created entries (customer_id FK)
+        // Order by created_at (works for both schemas — booking_date is null for VAPI bookings)
         let bookingsQuery = supabase
             .from('bookings')
-            .select('*', { count: 'exact' })
+            .select('*, customers(name, email, phone)', { count: 'exact' })
             .eq('restaurant_id', restaurantId)
-            .order('booking_date', { ascending: false })
             .order('created_at', { ascending: false });
 
-        if (startDate) bookingsQuery = bookingsQuery.gte('booking_date', startDate);
-        if (endDate) bookingsQuery = bookingsQuery.lte('booking_date', endDate);
+        // Date filter: support both booking_date (manual) and booked_for (VAPI)
+        if (startDate) {
+            bookingsQuery = bookingsQuery.or(
+                `booking_date.gte.${startDate},booked_for.gte.${startDate}T00:00:00`
+            );
+        }
+        if (endDate) {
+            bookingsQuery = bookingsQuery.or(
+                `booking_date.lte.${endDate},booked_for.lte.${endDate}T23:59:59`
+            );
+        }
 
-        const { data: bookings, count: totalBookings } = await bookingsQuery;
+        const { data: rawBookings, count: totalBookings } = await bookingsQuery;
 
-        // Get call logs
+        // Normalize: unify both booking schemas for the frontend
+        const bookings = (rawBookings || []).map((b: any) => {
+            let bookingDate = b.booking_date;
+            let bookingTime = b.booking_time;
+            if (!bookingDate && b.booked_for) {
+                const dt = new Date(b.booked_for);
+                bookingDate = dt.toISOString().split('T')[0];
+                bookingTime = dt.toTimeString().slice(0, 5);
+            }
+            const customer = b.customers;
+            return {
+                ...b,
+                booking_date: bookingDate,
+                booking_time: bookingTime,
+                guest_name:  b.guest_name  || customer?.name  || 'N/A',
+                guest_email: b.guest_email || customer?.email || null,
+                guest_phone: b.guest_phone || customer?.phone || null,
+                party_size:  b.party_size  ?? b.covers        ?? null,
+                customers: undefined,
+            };
+        });
+
+        // Call logs
         let callsQuery = supabase
             .from('call_logs')
             .select('*', { count: 'exact' })
@@ -34,31 +65,25 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
             .order('created_at', { ascending: false });
 
         if (startDate) callsQuery = callsQuery.gte('created_at', startDate);
-        if (endDate) callsQuery = callsQuery.lte('created_at', endDate);
+        if (endDate)   callsQuery = callsQuery.lte('created_at', endDate);
 
         const { data: calls, count: totalCalls } = await callsQuery;
 
-        // Calculate statistics
-        const confirmedBookings = bookings?.filter(b => b.status === 'confirmed').length || 0;
-        const cancelledBookings = bookings?.filter(b => b.status === 'cancelled').length || 0;
-        const totalGuests = bookings?.reduce((sum, b) => sum + (b.party_size ?? b.covers ?? 0), 0) || 0;
+        // Stats
+        const confirmedBookings = bookings.filter((b: any) => b.status === 'confirmed').length;
+        const cancelledBookings = bookings.filter((b: any) => b.status === 'cancelled').length;
+        const totalGuests = bookings.reduce((sum: number, b: any) => sum + (b.party_size || 0), 0);
         const avgPartySize = totalBookings ? (totalGuests / totalBookings).toFixed(1) : 0;
 
-        // Call statistics
-        const successfulCalls = calls?.filter(c => c.status === 'completed').length || 0;
+        const successfulCalls = calls?.filter((c: any) => c.status === 'completed').length || 0;
         const avgCallDuration = calls?.length
-            ? (calls.reduce((sum, c) => sum + (c.duration || 0), 0) / calls.length).toFixed(0)
+            ? (calls.reduce((sum: number, c: any) => sum + (c.duration || 0), 0) / calls.length).toFixed(0)
             : 0;
 
-        // Booking sources
-        const bookingsBySource = bookings?.reduce((acc: any, b) => {
+        const bookingsBySource = bookings.reduce((acc: any, b: any) => {
             acc[b.source || 'unknown'] = (acc[b.source || 'unknown'] || 0) + 1;
             return acc;
         }, {});
-
-        // Recent activity
-        const recentBookings = bookings?.slice(0, 10) || [];
-        const recentCalls = calls?.slice(0, 10) || [];
 
         res.json({
             bookings: {
@@ -75,8 +100,8 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
                 avgDuration: avgCallDuration
             },
             recent: {
-                bookings: recentBookings,
-                calls: recentCalls
+                bookings: bookings.slice(0, 10),
+                calls: (calls || []).slice(0, 10)
             }
         });
     } catch (error: any) {
@@ -84,6 +109,7 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
         res.status(500).json({ error: 'Failed to fetch statistics' });
     }
 });
+;
 
 /**
  * Get call logs

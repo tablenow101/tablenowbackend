@@ -181,8 +181,6 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         const restaurantId = req.user!.restaurantId;
         const { status, date, limit = 50, offset = 0 } = req.query;
 
-        console.log(`[DEBUG bookings] restaurantId from JWT: ${restaurantId}`);
-
         // DEBUG: check what restaurant_ids exist in bookings
         const { data: allBookings } = await supabase
             .from('bookings')
@@ -213,8 +211,6 @@ router.get('/', async (req: AuthRequest, res: Response) => {
             console.error('Database error:', error);
             return res.status(500).json({ error: 'Failed to fetch bookings' });
         }
-
-        console.log(`[DEBUG bookings] rows returned: ${bookings?.length}, count: ${count}, error: ${(error as any)?.message}`);
 
         // Normalize: unify both schemas into a consistent shape for the frontend
         const normalized = (bookings || []).map((b: any) => {

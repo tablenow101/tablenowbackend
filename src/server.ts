@@ -22,8 +22,6 @@ import emailRoutes from './routes/email';
 import calendarRoutes from './routes/calendar';
 import settingsRoutes from './routes/settings';
 import prefillRouter from './routes/prefill.route';
-import { checkAvailability } from './controllers/checkAvailability';
-import { createReservation } from './controllers/createReservation';
 
 const app: Application = express();
 const PORT = process.env.PORT || 5000;
@@ -88,13 +86,9 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use(prefillRouter);
 
-// VAPI tool endpoints at /vapi/* (no /api prefix, no rate limiting)
-// Tools use: /vapi/check-availability, /vapi/create-booking, /vapi/assistant-config
+// VAPI routes also at /vapi/* (no /api prefix) for backward compatibility
+// Canonical: /api/vapi/*
 app.use('/vapi', vapiRoutes);
-
-// Legacy VAPI Webhook routes (top-level, no rate limiting)
-app.post('/check-availability', checkAvailability);
-app.post('/create-reservation', createReservation);
 
 // Error handling middleware
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
