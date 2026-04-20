@@ -41,7 +41,7 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
         // Calculate statistics
         const confirmedBookings = bookings?.filter(b => b.status === 'confirmed').length || 0;
         const cancelledBookings = bookings?.filter(b => b.status === 'cancelled').length || 0;
-        const totalGuests = bookings?.reduce((sum, b) => sum + (b.party_size || 0), 0) || 0;
+        const totalGuests = bookings?.reduce((sum, b) => sum + (b.party_size ?? b.covers ?? 0), 0) || 0;
         const avgPartySize = totalBookings ? (totalGuests / totalBookings).toFixed(1) : 0;
 
         // Call statistics

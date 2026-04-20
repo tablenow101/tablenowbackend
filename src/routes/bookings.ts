@@ -173,18 +173,20 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
 /**
  * Get all bookings for restaurant
+ * Normalizes both legacy (booking_date/booking_time/party_size/guest_*)
+ * and VAPI-created bookings (booked_for/covers/customer_id)
  */
 router.get('/', async (req: AuthRequest, res: Response) => {
     try {
         const restaurantId = req.user!.restaurantId;
         const { status, date, limit = 50, offset = 0 } = req.query;
 
+        // Join customers table to hydrate guest info for VAPI bookings
         let query = supabase
             .from('bookings')
-            .select('*', { count: 'exact' })
+            .select('*, customers(name, email, phone)', { count: 'exact' })
             .eq('restaurant_id', restaurantId)
-            .order('booking_date', { ascending: false })
-            .order('booking_time', { ascending: false })
+            .order('created_at', { ascending: false })
             .range(Number(offset), Number(offset) + Number(limit) - 1);
 
         if (status) {
@@ -192,7 +194,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         }
 
         if (date) {
-            query = query.eq('booking_date', date);
+            // Support both booking_date (legacy) and booked_for (VAPI)
+            query = query.or(`booking_date.eq.${date},booked_for.gte.${date}T00:00:00,booked_for.lte.${date}T23:59:59`);
         }
 
         const { data: bookings, error, count } = await query;
@@ -202,8 +205,41 @@ router.get('/', async (req: AuthRequest, res: Response) => {
             return res.status(500).json({ error: 'Failed to fetch bookings' });
         }
 
+        // Normalize: unify both schemas into a consistent shape for the frontend
+        const normalized = (bookings || []).map((b: any) => {
+            // Derive date + time from booked_for if legacy fields are absent
+            let bookingDate = b.booking_date;
+            let bookingTime = b.booking_time;
+            if (!bookingDate && b.booked_for) {
+                const dt = new Date(b.booked_for);
+                bookingDate = dt.toISOString().split('T')[0];
+                bookingTime = dt.toTimeString().slice(0, 5); // "HH:MM"
+            }
+
+            // Derive guest info from joined customer if legacy fields are absent
+            const customer = b.customers;
+            const guestName  = b.guest_name  || customer?.name  || 'N/A';
+            const guestEmail = b.guest_email || customer?.email || null;
+            const guestPhone = b.guest_phone || customer?.phone || null;
+
+            // Derive party size
+            const partySize = b.party_size ?? b.covers ?? null;
+
+            return {
+                ...b,
+                booking_date: bookingDate,
+                booking_time: bookingTime,
+                guest_name:   guestName,
+                guest_email:  guestEmail,
+                guest_phone:  guestPhone,
+                party_size:   partySize,
+                // Keep raw fields too, remove joined object
+                customers: undefined,
+            };
+        });
+
         res.json({
-            bookings,
+            bookings: normalized,
             total: count,
             limit: Number(limit),
             offset: Number(offset)
