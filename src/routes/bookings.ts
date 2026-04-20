@@ -1,459 +1,137 @@
 import { Router, Response } from 'express';
-import { v4 as uuidv4 } from 'uuid';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
+import { validate } from '../middleware/handlers';
+import {
+    ManualCreateBookingSchema,
+    UpdateBookingSchema,
+    BookingQuerySchema
+} from '../types/schemas';
+import {
+    getBookings,
+    getBookingById,
+    cancelBooking,
+    normalizeBooking
+} from '../services/booking.service';
+import { NotFoundError, DatabaseError } from '../lib/errors';
 import supabase from '../config/supabase';
 import emailService from '../services/email.service';
-import hubspotService from '../services/hubspot.service';
 import calendarService from '../services/calendar.service';
-import twilioService from '../services/twilio.service';
+import logger from '../lib/logger';
 
 const router = Router();
-
-// All routes require authentication
 router.use(authenticateToken);
 
-/**
- * Create new booking
- */
-router.post('/', async (req: AuthRequest, res: Response) => {
+// ─── GET /bookings ────────────────────────────────────────────────────────────
+
+router.get('/', validate(BookingQuerySchema, 'query'), async (req: AuthRequest, res: Response, next) => {
     try {
-        const {
-            guestName,
-            guestEmail,
-            guestPhone,
-            date,
-            time,
-            partySize,
-            specialRequests
-        } = req.body;
+        const result = await getBookings(req.user!.restaurantId, req.query as any);
+        res.json(result);
+    } catch (err) { next(err); }
+});
 
+// ─── GET /bookings/:id ────────────────────────────────────────────────────────
+
+router.get('/:id', async (req: AuthRequest, res: Response, next) => {
+    try {
+        const booking = await getBookingById(req.params.id, req.user!.restaurantId);
+        res.json({ booking });
+    } catch (err) { next(err); }
+});
+
+// ─── POST /bookings (manual creation from dashboard) ─────────────────────────
+
+router.post('/', validate(ManualCreateBookingSchema), async (req: AuthRequest, res: Response, next) => {
+    try {
+        const { guestName, guestEmail, guestPhone, date, time, partySize, specialRequests } = req.body;
         const restaurantId = req.user!.restaurantId;
+        const log = logger.child({ restaurantId, path: 'POST /bookings' });
 
-        // Validation
-        if (!guestName || !guestEmail || !date || !time || !partySize) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-
-        // Check availability
-        const isAvailable = await checkTableAvailability(restaurantId, date, time, partySize);
-        if (!isAvailable) {
-            return res.status(409).json({ error: 'No tables available for the requested time' });
-        }
-
-        // Generate confirmation number
-        const confirmationNumber = `TN-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
-
-        // Create booking
-        const { data: booking, error: dbError } = await supabase
-            .from('bookings')
-            .insert({
-                restaurant_id: restaurantId,
-                guest_name: guestName,
-                guest_email: guestEmail,
-                guest_phone: guestPhone,
-                booking_date: date,
-                booking_time: time,
-                party_size: partySize,
-                special_requests: specialRequests,
-                confirmation_number: confirmationNumber,
-                status: 'confirmed',
-                source: 'manual'
-            })
-            .select()
-            .single();
-
-        if (dbError) {
-            console.error('Database error:', dbError);
-            return res.status(500).json({ error: 'Failed to create booking' });
-        }
-
-        // Get restaurant details
         const { data: restaurant } = await supabase
             .from('restaurants')
             .select('*')
             .eq('id', restaurantId)
             .single();
 
-        // Send confirmation email to guest
-        await emailService.sendBookingConfirmation({
-            to: guestEmail,
-            restaurantName: restaurant?.name || 'Restaurant',
-            guestName,
-            date,
-            time,
-            partySize,
-            confirmationNumber
-        });
+        if (!restaurant) throw new NotFoundError('Restaurant');
 
-        // Send notification to restaurant
-        await emailService.sendRestaurantNotification({
-            to: restaurant?.email || '',
-            subject: 'New Booking Received',
-            message: `New booking for ${partySize} guests on ${date} at ${time}`,
-            bookingDetails: booking
-        });
+        const { data: booking, error } = await supabase
+            .from('bookings')
+            .insert({
+                restaurant_id:  restaurantId,
+                booking_date:   date,
+                booking_time:   time,
+                party_size:     partySize,
+                guest_name:     guestName,
+                guest_email:    guestEmail,
+                guest_phone:    guestPhone || null,
+                special_requests: specialRequests || null,
+                status:         'confirmed',
+                source:         'manual'
+            })
+            .select()
+            .single();
 
-        // Send SMS notification to restaurant if they have a VAPI number and a phone number
-        if (restaurant?.phone && restaurant?.vapi_phone_number && twilioService.isConfigured()) {
+        if (error || !booking) throw new DatabaseError('Failed to create booking', error);
+
+        log.info({ bookingId: booking.id }, 'Manual booking created');
+
+        // Non-blocking side effects
+        setImmediate(async () => {
             try {
-                const message = `TableNow: New booking received! ${guestName} for ${partySize} guests on ${date} at ${time}. Confirmation: ${confirmationNumber}`;
-                await twilioService.sendSms(restaurant.phone, restaurant.vapi_phone_number, message);
-                console.log(`SMS notification sent to ${restaurant.phone}`);
-            } catch (smsError) {
-                console.error('Failed to send SMS notification:', smsError);
-                // Don't fail the booking if SMS fails
+                await emailService.sendBookingConfirmation({
+                    to: guestEmail, restaurantName: restaurant.name,
+                    guestName, date, time, partySize, confirmationNumber: booking.id
+                });
+            } catch (e) { log.warn({ err: e }, 'Confirmation email failed'); }
+
+            if (restaurant.google_calendar_tokens) {
+                try {
+                    const tokens = JSON.parse(restaurant.google_calendar_tokens);
+                    const start = new Date(`${date}T${time}`);
+                    const end = new Date(start.getTime() + 2 * 3600000);
+                    await calendarService.createEvent(tokens, {
+                        summary: `${guestName} (${partySize} pers.)`,
+                        description: `Tel: ${guestPhone} | Email: ${guestEmail}`,
+                        start, end, attendees: [guestEmail]
+                    });
+                } catch (e) { log.warn({ err: e }, 'Calendar event failed'); }
             }
-        }
-
-        // Create HubSpot contact and deal
-        try {
-            await hubspotService.upsertContact({
-                email: guestEmail,
-                firstName: guestName.split(' ')[0],
-                lastName: guestName.split(' ').slice(1).join(' '),
-                phone: guestPhone,
-                restaurantName: restaurant?.name
-            });
-
-            const deal = await hubspotService.createDeal({
-                dealName: `${restaurant?.name} - ${guestName} - ${date}`,
-                contactEmail: guestEmail,
-                restaurantId,
-                reservationDate: `${date} ${time}`,
-                partySize
-            });
-
-            // Update booking with HubSpot deal ID
-            await supabase
-                .from('bookings')
-                .update({ hubspot_deal_id: deal.id })
-                .eq('id', booking.id);
-        } catch (hubspotError) {
-            console.error('HubSpot error:', hubspotError);
-            // Don't fail the booking if HubSpot fails
-        }
-
-        // Create calendar event if restaurant has calendar connected
-        if (restaurant?.google_calendar_tokens) {
-            try {
-                const startDateTime = new Date(`${date}T${time}`);
-                const endDateTime = new Date(startDateTime.getTime() + 2 * 60 * 60 * 1000); // 2 hours
-
-                const calendarEvent = await calendarService.createEvent(
-                    JSON.parse(restaurant.google_calendar_tokens),
-                    {
-                        summary: `Booking: ${guestName} (${partySize} guests)`,
-                        description: `Confirmation: ${confirmationNumber}\nPhone: ${guestPhone}\nEmail: ${guestEmail}\nSpecial Requests: ${specialRequests || 'None'}`,
-                        start: startDateTime,
-                        end: endDateTime,
-                        attendees: [guestEmail]
-                    }
-                );
-
-                // Update booking with calendar event ID
-                await supabase
-                    .from('bookings')
-                    .update({ calendar_event_id: calendarEvent.id })
-                    .eq('id', booking.id);
-            } catch (calendarError) {
-                console.error('Calendar error:', calendarError);
-            }
-        }
-
-        res.status(201).json({
-            message: 'Booking created successfully',
-            booking,
-            confirmationNumber
         });
-    } catch (error: any) {
-        console.error('Create booking error:', error);
-        res.status(500).json({ error: 'Failed to create booking' });
-    }
+
+        res.status(201).json({ message: 'Booking created', booking: normalizeBooking(booking) });
+    } catch (err) { next(err); }
 });
 
-/**
- * Get all bookings for restaurant
- * Normalizes both legacy (booking_date/booking_time/party_size/guest_*)
- * and VAPI-created bookings (booked_for/covers/customer_id)
- */
-router.get('/', async (req: AuthRequest, res: Response) => {
-    try {
-        const restaurantId = req.user!.restaurantId;
-        const { status, date, limit = 50, offset = 0 } = req.query;
+// ─── PUT /bookings/:id ────────────────────────────────────────────────────────
 
-        // DEBUG: check what restaurant_ids exist in bookings
-        const { data: allBookings } = await supabase
-            .from('bookings')
-            .select('id, restaurant_id, booked_for, booking_date, covers, status')
-            .limit(5);
-        console.log(`[DEBUG bookings] sample rows:`, JSON.stringify(allBookings));
-
-        // Join customers table to hydrate guest info for VAPI bookings
-        let query = supabase
-            .from('bookings')
-            .select('*, customers(name, email, phone)', { count: 'exact' })
-            .eq('restaurant_id', restaurantId)
-            .order('created_at', { ascending: false })
-            .range(Number(offset), Number(offset) + Number(limit) - 1);
-
-        if (status) {
-            query = query.eq('status', status);
-        }
-
-        if (date) {
-            // Support both booking_date (legacy) and booked_for (VAPI)
-            query = query.or(`booking_date.eq.${date},booked_for.gte.${date}T00:00:00,booked_for.lte.${date}T23:59:59`);
-        }
-
-        const { data: bookings, error, count } = await query;
-
-        if (error) {
-            console.error('Database error:', error);
-            return res.status(500).json({ error: 'Failed to fetch bookings' });
-        }
-
-        // Normalize: unify both schemas into a consistent shape for the frontend
-        const normalized = (bookings || []).map((b: any) => {
-            // Derive date + time from booked_for if legacy fields are absent
-            let bookingDate = b.booking_date;
-            let bookingTime = b.booking_time;
-            if (!bookingDate && b.booked_for) {
-                const dt = new Date(b.booked_for);
-                bookingDate = dt.toISOString().split('T')[0];
-                bookingTime = dt.toTimeString().slice(0, 5); // "HH:MM"
-            }
-
-            // Derive guest info from joined customer if legacy fields are absent
-            const customer = b.customers;
-            const guestName  = b.guest_name  || customer?.name  || 'N/A';
-            const guestEmail = b.guest_email || customer?.email || null;
-            const guestPhone = b.guest_phone || customer?.phone || null;
-
-            // Derive party size
-            const partySize = b.party_size ?? b.covers ?? null;
-
-            return {
-                ...b,
-                booking_date: bookingDate,
-                booking_time: bookingTime,
-                guest_name:   guestName,
-                guest_email:  guestEmail,
-                guest_phone:  guestPhone,
-                party_size:   partySize,
-                // Keep raw fields too, remove joined object
-                customers: undefined,
-            };
-        });
-
-        res.json({
-            bookings: normalized,
-            total: count,
-            limit: Number(limit),
-            offset: Number(offset)
-        });
-    } catch (error: any) {
-        console.error('Get bookings error:', error);
-        res.status(500).json({ error: 'Failed to fetch bookings' });
-    }
-});
-
-/**
- * Get single booking
- */
-router.get('/:id', async (req: AuthRequest, res: Response) => {
+router.put('/:id', validate(UpdateBookingSchema), async (req: AuthRequest, res: Response, next) => {
     try {
         const { id } = req.params;
         const restaurantId = req.user!.restaurantId;
 
+        await getBookingById(id, restaurantId); // Ensures exists + belongs to restaurant
+
         const { data: booking, error } = await supabase
             .from('bookings')
-            .select('*')
-            .eq('id', id)
-            .eq('restaurant_id', restaurantId)
-            .single();
-
-        if (error || !booking) {
-            return res.status(404).json({ error: 'Booking not found' });
-        }
-
-        res.json({ booking });
-    } catch (error: any) {
-        console.error('Get booking error:', error);
-        res.status(500).json({ error: 'Failed to fetch booking' });
-    }
-});
-
-/**
- * Update booking
- */
-router.put('/:id', async (req: AuthRequest, res: Response) => {
-    try {
-        const { id } = req.params;
-        const restaurantId = req.user!.restaurantId;
-        const updates = req.body;
-
-        // Get existing booking
-        const { data: existingBooking } = await supabase
-            .from('bookings')
-            .select('*')
-            .eq('id', id)
-            .eq('restaurant_id', restaurantId)
-            .single();
-
-        if (!existingBooking) {
-            return res.status(404).json({ error: 'Booking not found' });
-        }
-
-        // Update booking
-        const { data: booking, error } = await supabase
-            .from('bookings')
-            .update(updates)
+            .update(req.body)
             .eq('id', id)
             .eq('restaurant_id', restaurantId)
             .select()
             .single();
 
-        if (error) {
-            console.error('Database error:', error);
-            return res.status(500).json({ error: 'Failed to update booking' });
-        }
-
-        // Update calendar event if exists
-        if (existingBooking.calendar_event_id) {
-            const { data: restaurant } = await supabase
-                .from('restaurants')
-                .select('google_calendar_tokens')
-                .eq('id', restaurantId)
-                .single();
-
-            if (restaurant?.google_calendar_tokens) {
-                try {
-                    await calendarService.updateEvent(
-                        JSON.parse(restaurant.google_calendar_tokens),
-                        existingBooking.calendar_event_id,
-                        {
-                            summary: `Booking: ${booking.guest_name} (${booking.party_size} guests)`,
-                            start: new Date(`${booking.booking_date}T${booking.booking_time}`),
-                            end: new Date(new Date(`${booking.booking_date}T${booking.booking_time}`).getTime() + 2 * 60 * 60 * 1000)
-                        }
-                    );
-                } catch (calendarError) {
-                    console.error('Calendar update error:', calendarError);
-                }
-            }
-        }
-
-        res.json({ message: 'Booking updated successfully', booking });
-    } catch (error: any) {
-        console.error('Update booking error:', error);
-        res.status(500).json({ error: 'Failed to update booking' });
-    }
+        if (error) throw new DatabaseError('Failed to update booking', error);
+        res.json({ message: 'Booking updated', booking: normalizeBooking(booking) });
+    } catch (err) { next(err); }
 });
 
-/**
- * Cancel booking
- */
-router.delete('/:id', async (req: AuthRequest, res: Response) => {
+// ─── DELETE /bookings/:id ─────────────────────────────────────────────────────
+
+router.delete('/:id', async (req: AuthRequest, res: Response, next) => {
     try {
-        const { id } = req.params;
-        const restaurantId = req.user!.restaurantId;
-
-        // Get booking
-        const { data: booking } = await supabase
-            .from('bookings')
-            .select('*')
-            .eq('id', id)
-            .eq('restaurant_id', restaurantId)
-            .single();
-
-        if (!booking) {
-            return res.status(404).json({ error: 'Booking not found' });
-        }
-
-        // Update status to cancelled
-        const { error } = await supabase
-            .from('bookings')
-            .update({ status: 'cancelled' })
-            .eq('id', id);
-
-        if (error) {
-            console.error('Database error:', error);
-            return res.status(500).json({ error: 'Failed to cancel booking' });
-        }
-
-        // Delete calendar event
-        if (booking.calendar_event_id) {
-            const { data: restaurant } = await supabase
-                .from('restaurants')
-                .select('google_calendar_tokens')
-                .eq('id', restaurantId)
-                .single();
-
-            if (restaurant?.google_calendar_tokens) {
-                try {
-                    await calendarService.deleteEvent(
-                        JSON.parse(restaurant.google_calendar_tokens),
-                        booking.calendar_event_id
-                    );
-                } catch (calendarError) {
-                    console.error('Calendar delete error:', calendarError);
-                }
-            }
-        }
-
-        // Update HubSpot deal
-        if (booking.hubspot_deal_id) {
-            try {
-                await hubspotService.updateDealStatus(booking.hubspot_deal_id, 'cancelled');
-            } catch (hubspotError) {
-                console.error('HubSpot error:', hubspotError);
-            }
-        }
-
-        res.json({ message: 'Booking cancelled successfully' });
-    } catch (error: any) {
-        console.error('Cancel booking error:', error);
-        res.status(500).json({ error: 'Failed to cancel booking' });
-    }
+        const booking = await cancelBooking(req.params.id, req.user!.restaurantId);
+        res.json({ message: 'Booking cancelled', booking });
+    } catch (err) { next(err); }
 });
-
-/**
- * Check table availability
- */
-async function checkTableAvailability(
-    restaurantId: string,
-    date: string,
-    time: string,
-    partySize: number
-): Promise<boolean> {
-    // Get restaurant capacity and existing bookings
-    const { data: restaurant } = await supabase
-        .from('restaurants')
-        .select('capacity, max_party_size')
-        .eq('id', restaurantId)
-        .single();
-
-    if (!restaurant) return false;
-
-    // Check if party size exceeds maximum
-    if (partySize > (restaurant.max_party_size || 10)) {
-        return false;
-    }
-
-    // Get bookings for the same date and time slot (±1 hour)
-    const { data: existingBookings } = await supabase
-        .from('bookings')
-        .select('party_size')
-        .eq('restaurant_id', restaurantId)
-        .eq('booking_date', date)
-        .gte('booking_time', time)
-        .lte('booking_time', time)
-        .eq('status', 'confirmed');
-
-    const totalBooked = existingBookings?.reduce((sum, b) => sum + b.party_size, 0) || 0;
-    const availableCapacity = (restaurant.capacity || 50) - totalBooked;
-
-    return availableCapacity >= partySize;
-}
 
 export default router;

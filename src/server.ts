@@ -1,113 +1,101 @@
 import dotenv from 'dotenv';
 import path from 'path';
-
-// For PM2 production safety, explicitly resolve the .env path regardless of where the app is launched from
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
+import pinoHttp from 'pino-http';
 
-// Import routes
-import authRoutes from './routes/auth';
-import dashboardRoutes from './routes/dashboard';
-import bookingRoutes from './routes/bookings';
-import vapiRoutes from './routes/vapi';
-import customersRoutes from './routes/customers';
+import logger from './lib/logger';
+import { correlationId, errorHandler } from './middleware/handlers';
+
+import authRoutes       from './routes/auth';
+import dashboardRoutes  from './routes/dashboard';
+import bookingRoutes    from './routes/bookings';
+import vapiRoutes       from './routes/vapi';
+import customersRoutes  from './routes/customers';
 import availabilityRoutes from './routes/availability';
-import emailRoutes from './routes/email';
-import calendarRoutes from './routes/calendar';
-import settingsRoutes from './routes/settings';
-import prefillRouter from './routes/prefill.route';
+import emailRoutes      from './routes/email';
+import calendarRoutes   from './routes/calendar';
+import settingsRoutes   from './routes/settings';
+import prefillRouter    from './routes/prefill.route';
 
 const app: Application = express();
 const PORT = process.env.PORT || 5000;
 
-// Trust proxy for express-rate-limit
 app.set('trust proxy', 1);
 
-// Security middleware
+// ── Security ──────────────────────────────────────────────────────────────────
 app.use(helmet());
+
 const allowedOrigins = [
     process.env.FRONTEND_URL,
     'http://localhost:5173',
     'http://localhost:5174',
-    'https://tablenowfrontend.vercel.app',
-    'https://www.tablenowfrontend.vercel.app',
     'https://app.tablenow.io',
     'https://tablenow.io',
     'https://www.tablenow.io'
-].filter(Boolean); // Remove any undefined values
+].filter(Boolean) as string[];
 
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) {
-            return callback(null, origin || allowedOrigins[0]);
-        }
-        return callback(new Error('Not allowed by CORS'));
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, origin || allowedOrigins[0]);
+        callback(new Error(`CORS: origin ${origin} not allowed`));
     },
     credentials: true
 }));
 
-// Rate limiting
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100 // limit each IP to 100 requests per windowMs
+// ── Raw body capture (for VAPI HMAC verification) ─────────────────────────────
+app.use('/api/vapi/webhook', express.raw({ type: 'application/json' }), (req: Request, _res: Response, next: NextFunction) => {
+    (req as any).rawBody = req.body;
+    req.body = JSON.parse(req.body.toString());
+    next();
 });
-app.use('/api/', limiter);
 
-// Cookie parsing (needed for OAuth CSRF state)
+// ── Middleware ────────────────────────────────────────────────────────────────
+app.use(correlationId);
+app.use(pinoHttp({ logger, useLevel: 'info' }));
 app.use(cookieParser());
-
-// Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Logging
-app.use(morgan('combined'));
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
+app.use('/api/', limiter);
 
-// Health check
-app.get('/health', (req: Request, res: Response) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// ── Health ────────────────────────────────────────────────────────────────────
+app.get('/health', (_req: Request, res: Response) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString(), version: process.env.npm_package_version });
 });
 
-// API Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/dashboard', dashboardRoutes);
-app.use('/api/bookings', bookingRoutes);
-app.use('/api/vapi', vapiRoutes);
-app.use('/api', customersRoutes);
+// ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/api/auth',         authRoutes);
+app.use('/api/dashboard',    dashboardRoutes);
+app.use('/api/bookings',     bookingRoutes);
+app.use('/api/vapi',         vapiRoutes);
+app.use('/api',              customersRoutes);
 app.use('/api/availability', availabilityRoutes);
-app.use('/api/email', emailRoutes);
-app.use('/api/calendar', calendarRoutes);
-app.use('/api/settings', settingsRoutes);
+app.use('/api/email',        emailRoutes);
+app.use('/api/calendar',     calendarRoutes);
+app.use('/api/settings',     settingsRoutes);
 app.use(prefillRouter);
 
-// VAPI routes also at /vapi/* (no /api prefix) for backward compatibility
-// Canonical: /api/vapi/*
+// Backward compat: VAPI tools also reachable at /vapi/* (no rate limit)
 app.use('/vapi', vapiRoutes);
 
-// Error handling middleware
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-    console.error('Error:', err);
-    res.status(500).json({
-        error: 'Internal server error',
-        message: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
+// ── 404 ───────────────────────────────────────────────────────────────────────
+app.use((req: Request, res: Response) => {
+    res.status(404).json({ error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.path} not found` } });
 });
 
-// 404 handler
-app.use((req: Request, res: Response) => {
-    res.status(404).json({ error: 'Route not found' });
-});
+// ── Unified error handler (must be last) ──────────────────────────────────────
+app.use(errorHandler);
 
 app.listen(PORT, () => {
-    console.log(`🚀 TableNow Backend running on port ${PORT}`);
-    console.log(`🌍 Public URL: ${process.env.BACKEND_URL}`);
-    console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+    logger.info({ port: PORT, env: process.env.NODE_ENV, url: process.env.BACKEND_URL }, '🚀 TableNow API started');
 });
 
 export default app;
