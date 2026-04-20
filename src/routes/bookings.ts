@@ -183,6 +183,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
         console.log(`[DEBUG bookings] restaurantId from JWT: ${restaurantId}`);
 
+        // DEBUG: check what restaurant_ids exist in bookings
+        const { data: allBookings } = await supabase
+            .from('bookings')
+            .select('id, restaurant_id, booked_for, booking_date, covers, status')
+            .limit(5);
+        console.log(`[DEBUG bookings] sample rows:`, JSON.stringify(allBookings));
+
         // Join customers table to hydrate guest info for VAPI bookings
         let query = supabase
             .from('bookings')
