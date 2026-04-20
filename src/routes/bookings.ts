@@ -207,7 +207,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
             return res.status(500).json({ error: 'Failed to fetch bookings' });
         }
 
-        console.log(`[DEBUG bookings] rows returned: ${bookings?.length}, count: ${count}, error: ${error?.message}`);
+        console.log(`[DEBUG bookings] rows returned: ${bookings?.length}, count: ${count}, error: ${(error as any)?.message}`);
 
         // Normalize: unify both schemas into a consistent shape for the frontend
         const normalized = (bookings || []).map((b: any) => {
