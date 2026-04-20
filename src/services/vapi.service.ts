@@ -13,89 +13,142 @@ export class VapiService {
         return `${process.env.BACKEND_URL}/api/vapi/webhook`;
     }
 
-    /**
-     * Assign an available REAL phone number from the Vapi pool.
-     */
-    async createPhoneNumber(restaurantId: string, restaurantName: string): Promise<any> {
-        try {
-            const response = await axios.get(
-                `${VAPI_BASE_URL}/phone-number`,
-                { headers: this.headers }
-            );
-
-            console.log(`📞 VAPI phone pool returned ${response.data.length} numbers`);
-
-            const availableNumber = response.data.find((p: any) => !p.assistantId && p.number);
-
-            if (availableNumber) {
-                console.log(`📞 Available REAL number found: ${availableNumber.number} (ID: ${availableNumber.id})`);
-
-                const serverUrl = `${process.env.BACKEND_URL}/vapi/assistant-config`;
-                await axios.patch(
-                    `${VAPI_BASE_URL}/phone-number/${availableNumber.id}`,
-                    { serverUrl },
-                    { headers: this.headers }
-                );
-                console.log(`🔗 Server URL pre-set on phone: ${serverUrl}`);
-
-                return availableNumber;
+    private buildAssistantPayload(restaurantData: any): object {
+        const serverUrl = this.getServerUrl();
+        return {
+            name: `${restaurantData.name} — Clara`,
+            transcriber: {
+                provider: 'deepgram',
+                model: 'nova-2',
+                language: 'multi',
+                smartFormat: true,
+                punctuate: true
+            },
+            model: {
+                provider: 'openai',
+                model: 'gpt-4o',
+                temperature: 0.3,
+                maxTokens: 120,
+                systemPrompt: this.generateSystemPrompt(),
+                tools: this.generateTools()
+            },
+            voice: {
+                provider: 'openai',
+                voiceId: 'shimmer',
+                model: 'gpt-4o-mini-tts',
+                voiceGuidance: 'Speak naturally and warmly, like a real receptionist. Keep a calm, professional pace. Never robotic or rushed.'
+            },
+            firstMessage: 'Bonjour, {{restaurantName}}, Clara à votre service, comment puis-je vous aider ?',
+            endCallMessage: 'Bonne journée, au revoir !',
+            serverUrl,
+            silenceTimeoutSeconds: 12,
+            maxDurationSeconds: 600,
+            backgroundDenoisingEnabled: true,
+            responseDelaySeconds: 0.4,
+            recordingEnabled: true,
+            hipaaEnabled: false,
+            modelOutputInMessagesEnabled: true,
+            stopSpeakingPlan: {
+                numWords: 2,
+                voiceSeconds: 0.2,
+                backoffSeconds: 1
             }
-
-            const allAvailable = response.data.filter((p: any) => !p.assistantId);
-            console.error(`❌ No real phone numbers available. Found ${allAvailable.length} SIP-only entries.`);
-            throw new Error('No available phone numbers with a real callable number in the Vapi pool.');
-        } catch (error: any) {
-            console.error('Error assigning VAPI phone number:', error.response?.data || error.message);
-            throw error;
-        }
+        };
     }
 
-    /**
-     * Create AI assistant for restaurant — Clara persona, French-only
-     * System prompt uses {{variable}} placeholders filled by /vapi/assistant-config
-     */
+    public generateSystemPrompt(): string {
+        return `You are Clara, the phone receptionist at {{restaurantName}}. Your only job is taking table reservations.
+
+LANGUAGE: Detect the caller's language in their first sentence and speak that language for the entire call. Fluent in: French, English, Spanish, Portuguese, German, Italian, Arabic, Russian, Japanese, Mandarin, Hindi, Korean. Default to French if unclear.
+
+RESTAURANT:
+Name: {{restaurantName}} | Address: {{address}} | Direct line: {{humanPhone}} | Hours: {{openingHours}} | ID: {{restaurantId}}
+
+TODAY (Paris): {{currentDate}} — {{currentDateISO}}
+UPCOMING: {{nextDays}}
+(example format: "wednesday=2026-04-22, thursday=2026-04-23, next_wednesday=2026-04-29, ...")
+
+TO BOOK: number of guests · date · time · full name · phone number
+
+DATE RULES — never break these:
+- Never calculate a date in your head. Always read from {{nextDays}} or {{currentDateISO}}.
+- "next Wednesday" / "mercredi prochain" / "el miércoles que viene" → look it up in {{nextDays}}
+- "the 25th" / "le 25 avril" → year comes from {{currentDateISO}}
+- "5/4" or "04/05" → ambiguous → ask "Do you mean the 5th of April or the 4th of May?"
+- Always confirm the full date to the caller before checking availability
+- Never say the year out loud
+
+TOOLS:
+1. check_availability(restaurant_id, date YYYY-MM-DD, time HH:MM, covers) — always call before confirming a slot
+2. create_booking(restaurant_id, date, time, covers, first_name, last_name, phone) — only after caller confirms recap
+
+Before create_booking, always recap:
+"[N] guests, [DAY] [DATE] at [TIME], name [FIRST LAST], callback [PHONE] — is that correct?"
+(adapt recap language to match caller's language)
+
+STYLE:
+- Max 2 sentences per response. Phone call = brief.
+- Warm and natural. Echo back what you understood: "Perfect, 4 people..."
+- Ask for full name in one shot: "And your first and last name please?"
+- Hard to hear a name? "Could you spell that for me?"
+- Modification / cancellation → "For that, please call us directly at {{humanPhone}}"
+- Off-topic (menu, pets, prices) → "I only handle reservations — for anything else, call {{humanPhone}}"`;
+    }
+
+    public generateTools(): any[] {
+        const backendUrl = process.env.BACKEND_URL || 'https://api.tablenow.io';
+        return [
+            {
+                type: 'function',
+                function: {
+                    name: 'check_availability',
+                    description: 'Check table availability. Must call before announcing any slot is free.',
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            restaurant_id: { type: 'string', description: 'Restaurant UUID' },
+                            date:          { type: 'string', description: 'YYYY-MM-DD' },
+                            time:          { type: 'string', description: 'HH:MM (24h)' },
+                            covers:        { type: 'integer', description: 'Number of guests' }
+                        },
+                        required: ['restaurant_id', 'date', 'time', 'covers']
+                    }
+                },
+                server: { url: `${backendUrl}/api/vapi/check-availability`, timeoutSeconds: 6 }
+            },
+            {
+                type: 'function',
+                function: {
+                    name: 'create_booking',
+                    description: 'Create confirmed reservation. Only call after explicit caller confirmation of full recap.',
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            restaurant_id: { type: 'string', description: 'Restaurant UUID' },
+                            date:          { type: 'string', description: 'YYYY-MM-DD' },
+                            time:          { type: 'string', description: 'HH:MM (24h)' },
+                            covers:        { type: 'integer', description: 'Number of guests' },
+                            first_name:    { type: 'string', description: 'First name' },
+                            last_name:     { type: 'string', description: 'Last name' },
+                            phone:         { type: 'string', description: 'Caller phone number' }
+                        },
+                        required: ['restaurant_id', 'date', 'time', 'covers', 'first_name', 'last_name', 'phone']
+                    }
+                },
+                server: { url: `${backendUrl}/api/vapi/create-booking`, timeoutSeconds: 10 }
+            }
+        ];
+    }
+
     async createAssistant(restaurantData: any): Promise<any> {
         try {
-            const serverUrl = this.getServerUrl();
-            const systemPrompt = this.generateSystemPrompt();
-
             console.log(`🚀 Creating VAPI Assistant for ${restaurantData.name}...`);
-            console.log(`🌍 Webhook URL: ${serverUrl}`);
-
             const response = await axios.post(
                 `${VAPI_BASE_URL}/assistant`,
-                {
-                    name: `${restaurantData.name} — Clara`,
-                    transcriber: {
-                        provider: 'deepgram',
-                        model: 'nova-2',
-                        language: 'fr'
-                    },
-                    model: {
-                        provider: 'openai',
-                        model: 'gpt-4o',
-                        temperature: 0.25,
-                        maxTokens: 150,
-                        systemPrompt,
-                        tools: this.generateTools()
-                    },
-                    voice: {
-                        provider: 'azure',
-                        voiceId: 'fr-FR-DeniseNeural'
-                    },
-                    firstMessage: 'Bonjour, restaurant {{restaurantName}}, Clara à votre service, comment puis-je vous aider ?',
-                    endCallMessage: 'Au revoir, bonne journée !',
-                    serverUrl,
-                    silenceTimeoutSeconds: 10,
-                    maxDurationSeconds: 600,
-                    backgroundDenoisingEnabled: true,
-                    responseDelaySeconds: 0.5,
-                    recordingEnabled: true,
-                    hipaaEnabled: false,
-                    modelOutputInMessagesEnabled: true
-                },
+                this.buildAssistantPayload(restaurantData),
                 { headers: this.headers }
             );
+            console.log(`✅ Assistant created: ${response.data.id}`);
             return response.data;
         } catch (error: any) {
             console.error('Error creating VAPI assistant:', error.response?.data || error.message);
@@ -103,55 +156,19 @@ export class VapiService {
         }
     }
 
-    /**
-     * Update assistant config
-     */
     async updateAssistant(assistantId: string, restaurantData: any): Promise<any> {
         try {
-            const systemPrompt = this.generateSystemPrompt();
-            const serverUrl = this.getServerUrl();
-
             console.log(`🔄 Updating VAPI Assistant ${assistantId}...`);
-
-            const payload = {
-                name: `${restaurantData.name} — Clara`,
-                transcriber: {
-                    provider: 'deepgram',
-                    model: 'nova-2',
-                    language: 'fr'
-                },
-                model: {
-                    provider: 'openai',
-                    model: 'gpt-4o',
-                    temperature: 0.25,
-                    maxTokens: 150,
-                    systemPrompt,
-                    tools: this.generateTools()
-                },
-                voice: {
-                    provider: 'azure',
-                    voiceId: 'fr-FR-DeniseNeural'
-                },
-                firstMessage: 'Bonjour, restaurant {{restaurantName}}, Clara à votre service, comment puis-je vous aider ?',
-                endCallMessage: 'Au revoir, bonne journée !',
-                serverUrl,
-                silenceTimeoutSeconds: 10,
-                maxDurationSeconds: 600,
-                backgroundDenoisingEnabled: true,
-                responseDelaySeconds: 0.5
-            };
-
             const response = await axios.patch(
                 `${VAPI_BASE_URL}/assistant/${assistantId}`,
-                payload,
+                this.buildAssistantPayload(restaurantData),
                 { headers: this.headers }
             );
-
-            console.log(`✅ VAPI Assistant ${assistantId} updated successfully`);
+            console.log(`✅ Assistant ${assistantId} updated`);
             return response.data;
         } catch (error: any) {
             if (error.response?.status === 404) {
-                console.warn(`⚠️  VAPI Assistant ${assistantId} not found (404).`);
+                console.warn(`⚠️  Assistant ${assistantId} not found (404)`);
                 return null;
             }
             console.error('❌ Error updating VAPI assistant:', error.response?.data || error.message);
@@ -169,9 +186,24 @@ export class VapiService {
         }
     }
 
+    async createPhoneNumber(restaurantId: string, restaurantName: string): Promise<any> {
+        try {
+            const response = await axios.get(`${VAPI_BASE_URL}/phone-number`, { headers: this.headers });
+            const available = response.data.find((p: any) => !p.assistantId && p.number);
+            if (!available) throw new Error('No available phone numbers in the VAPI pool.');
+            const serverUrl = `${process.env.BACKEND_URL}/api/vapi/assistant-config`;
+            await axios.patch(`${VAPI_BASE_URL}/phone-number/${available.id}`, { serverUrl }, { headers: this.headers });
+            console.log(`📞 Assigned: ${available.number} (${available.id})`);
+            return available;
+        } catch (error: any) {
+            console.error('Error assigning VAPI phone number:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
     async linkAssistantToPhone(phoneNumberId: string, assistantId: string): Promise<any> {
         try {
-            const serverUrl = `${process.env.BACKEND_URL}/vapi/assistant-config`;
+            const serverUrl = `${process.env.BACKEND_URL}/api/vapi/assistant-config`;
             const response = await axios.patch(
                 `${VAPI_BASE_URL}/phone-number/${phoneNumberId}`,
                 { assistantId, serverUrl },
@@ -183,155 +215,6 @@ export class VapiService {
             console.error('Error linking assistant to phone:', error.response?.data || error.message);
             throw error;
         }
-    }
-
-    /**
-     * Generate system prompt template with {{variable}} placeholders.
-     * Variables are filled dynamically by /vapi/assistant-config on each call.
-     */
-    public generateSystemPrompt(): string {
-        return `Tu es Clara, l'assistante téléphonique du restaurant {{restaurantName}}. Tu parles EXCLUSIVEMENT en français, quoi qu'il arrive — même si le client parle anglais ou une autre langue. Tu vouvoies toujours les clients. Ton ton est chaleureux, naturel et professionnel.
-
-TON UNIQUE RÔLE : prendre des réservations par téléphone. Rien d'autre.
-
-INFORMATIONS DU RESTAURANT :
-- Nom : {{restaurantName}}
-- Adresse : {{address}}
-- Téléphone direct : {{humanPhone}}
-- Horaires : {{openingHours}}
-- ID restaurant : {{restaurantId}}
-
-DATE ET HEURE ACTUELLES (Paris) :
-- Aujourd'hui : {{currentDate}}
-- ISO : {{currentDateISO}}
-- Prochains jours : {{nextDays}}
-
-RÈGLES DE CONVERSION DE DATES — CRITIQUE :
-Tu DOIS convertir toute date relative en ISO YYYY-MM-DD AVANT d'appeler un outil.
-- "demain" → ajoute 1 jour à {{currentDateISO}}
-- "vendredi prochain", "ce mercredi" → lire la valeur dans {{nextDays}}
-- "le 25 avril" → l'année est celle de {{currentDateISO}}, donc 2026-04-25
-- Tu ne CALCULES JAMAIS une date de tête — tu lis uniquement {{nextDays}} et {{currentDateISO}}
-- Tu CONFIRMES toujours la date complète avant de vérifier : "Je vérifie pour le [jour] [date]..."
-- Tu ne prononces JAMAIS l'année à voix haute
-
----
-
-FLUX DE RÉSERVATION — ORDRE STRICT :
-
-Étape 1 — Collecte (une info à la fois) :
-1. Nombre de personnes
-2. Date → date floue = reformuler en date exacte et confirmer
-3. Heure
-4. "À quel nom dois-je faire la réservation ?" → prénom ET nom en une seule réponse
-5. "Quel est votre numéro de téléphone ?" → répéter : "Je note le [numéro], c'est bien ça ?"
-
-Étape 2 — Vérifier la disponibilité :
-Appelle check_availability (restaurant_id={{restaurantId}}, date ISO, heure HH:MM, covers).
-→ Disponible → étape 3
-→ Complet → proposer 2 créneaux alternatifs
-→ Aucune alternative → proposer autre date
-
-Étape 3 — Récapitulatif OBLIGATOIRE :
-"Je récapitule : [N] personnes, le [JOUR] [DATE], à [HEURE], au nom de [PRÉNOM NOM], rappel au [TÉLÉPHONE]. C'est bien cela ?"
-→ Confirmé → étape 4
-→ Correction → modifier et refaire le récapitulatif
-
-Étape 4 — Créer la réservation :
-Appelle create_booking. Annonce : "Parfait, votre réservation est confirmée ! Bonne journée, au revoir !"
-
----
-
-CAS PARTICULIERS :
-
-Client parle anglais ou autre langue :
-Répondre uniquement en français : "Je suis désolée, je ne réponds qu'en français. Puis-je vous aider pour une réservation ?"
-
-Modification / annulation :
-"Pour modifier ou annuler, merci de rappeler le restaurant au {{humanPhone}}."
-
-Question hors réservation (menu, prix, animaux...) :
-"Je ne gère que les réservations. Pour cette question, contactez le restaurant au {{humanPhone}}."
-
-Nom difficile :
-"Pourriez-vous épeler votre nom, s'il vous plaît ?"
-
-RÈGLES ABSOLUES :
-- Maximum 2 phrases par réponse
-- Jamais de disponibilité annoncée sans check_availability
-- Jamais de réservation sans confirmation explicite étape 3
-- Jamais de date calculée de tête — toujours lire {{nextDays}}`;
-    }
-
-    /**
-     * Generate VAPI Tool definitions — 2 tools with dedicated server URLs
-     */
-    public generateTools(): any[] {
-        const backendUrl = process.env.BACKEND_URL || 'https://api.tablenow.io';
-        return [
-            {
-                type: 'function',
-                function: {
-                    name: 'check_availability',
-                    description: "Vérifie si une table est disponible pour la date, heure et nombre de couverts demandés. Toujours appeler avant d'annoncer une disponibilité.",
-                    parameters: {
-                        type: 'object',
-                        properties: {
-                            restaurant_id: { type: 'string', description: 'ID du restaurant dans Supabase' },
-                            date: { type: 'string', description: 'Date au format YYYY-MM-DD' },
-                            time: { type: 'string', description: 'Heure au format HH:MM' },
-                            covers: { type: 'integer', description: 'Nombre de personnes' }
-                        },
-                        required: ['restaurant_id', 'date', 'time', 'covers']
-                    }
-                },
-                server: {
-                    url: `${backendUrl}/vapi/check-availability`,
-                    timeoutSeconds: 5
-                }
-            },
-            {
-                type: 'function',
-                function: {
-                    name: 'create_booking',
-                    description: "Crée une réservation confirmée. N'appeler QUE si le client a explicitement confirmé le récapitulatif complet.",
-                    parameters: {
-                        type: 'object',
-                        properties: {
-                            restaurant_id: { type: 'string', description: 'ID du restaurant' },
-                            date: { type: 'string', description: 'YYYY-MM-DD' },
-                            time: { type: 'string', description: 'HH:MM' },
-                            covers: { type: 'integer', description: 'Nombre de personnes' },
-                            first_name: { type: 'string', description: 'Prénom du client' },
-                            last_name: { type: 'string', description: 'Nom de famille du client' },
-                            phone: { type: 'string', description: 'Numéro de téléphone du client' }
-                        },
-                        required: ['restaurant_id', 'date', 'time', 'covers', 'first_name', 'last_name', 'phone']
-                    }
-                },
-                server: {
-                    url: `${backendUrl}/vapi/create-booking`,
-                    timeoutSeconds: 8
-                }
-            }
-        ];
-    }
-
-    /**
-     * Format opening hours JSONB into readable text — ordered lundi→dimanche
-     */
-    public formatOpeningHours(openingHours: any): string {
-        if (!openingHours || typeof openingHours !== 'object') return '';
-
-        const map: Record<string, string> = {
-            monday: 'lundi', tuesday: 'mardi', wednesday: 'mercredi',
-            thursday: 'jeudi', friday: 'vendredi', saturday: 'samedi', sunday: 'dimanche'
-        };
-
-        return Object.entries(map).map(([key, label]) => {
-            const h = openingHours[key];
-            return h?.open ? `${label}: ${h.from}–${h.to}` : `${label}: fermé`;
-        }).join(', ');
     }
 
     async deletePhoneNumber(phoneNumberId: string): Promise<void> {
@@ -350,6 +233,18 @@ RÈGLES ABSOLUES :
             console.error('Error deleting assistant:', error.response?.data || error.message);
             throw error;
         }
+    }
+
+    public formatOpeningHours(openingHours: any): string {
+        if (!openingHours || typeof openingHours !== 'object') return '';
+        const map: Record<string, string> = {
+            monday: 'lundi', tuesday: 'mardi', wednesday: 'mercredi',
+            thursday: 'jeudi', friday: 'vendredi', saturday: 'samedi', sunday: 'dimanche'
+        };
+        return Object.entries(map).map(([key, label]) => {
+            const h = openingHours[key];
+            return h?.open ? `${label}: ${h.from}–${h.to}` : `${label}: fermé`;
+        }).join(', ');
     }
 }
 

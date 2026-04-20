@@ -87,30 +87,36 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
 
         const openingHoursFormatted = vapiService.formatOpeningHours(restaurant.opening_hours);
 
-        console.log(`✅ assistant-config: ${restaurant.name}`);
-
-        // Inject current date in Paris timezone
+        // Live date injection (Paris timezone)
         const now = new Date();
-        const parisFull = new Intl.DateTimeFormat('fr-FR', {
-            timeZone: 'Europe/Paris',
-            weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
-        }).format(now);
-        const parisISOParts = new Intl.DateTimeFormat('fr-FR', {
-            timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit'
-        }).formatToParts(now).reduce((acc: any, p) => { acc[p.type] = p.value; return acc; }, {});
-        const currentDateISO = parisISOParts.year + '-' + parisISOParts.month + '-' + parisISOParts.day;
-        const currentDay = parisFull.split(' ')[0];
-
-        // Pre-compute next 7 day names → ISO dates
-        const nextDaysArr: string[] = [];
+        const tz = 'Europe/Paris';
+        const fmtFull = new Intl.DateTimeFormat('fr-FR', { timeZone: tz, weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+        const currentDate = fmtFull.format(now);
+        const todayParts = new Intl.DateTimeFormat('fr-FR', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+            .formatToParts(now).reduce((a, p) => { a[p.type] = p.value; return a; }, {});
+        const currentDateISO = todayParts['year'] + '-' + todayParts['month'] + '-' + todayParts['day'];
+        const isoFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+        const dayFmtEN = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' });
+        const isoOf = (d) => {
+            const p = isoFmt.formatToParts(d).reduce((a, x) => { a[x.type] = x.value; return a; }, {});
+            return p['year'] + '-' + p['month'] + '-' + p['day'];
+        };
+        const seen = {};
+        const parts = [
+            'tomorrow=' + isoOf(new Date(now.getTime() + 86400000)),
+            'day_after_tomorrow=' + isoOf(new Date(now.getTime() + 172800000))
+        ];
         for (let i = 1; i <= 14; i++) {
             const d = new Date(now.getTime() + i * 86400000);
-            const label = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long' }).format(d);
-            const parts = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d).reduce((acc: any, p) => { acc[p.type] = p.value; return acc; }, {});
-            const isoStr = parts.year + '-' + parts.month + '-' + parts.day;
-            if (!nextDaysArr.find(s => s.startsWith(label))) nextDaysArr.push(label + '_prochain=' + isoStr);
+            const dayEN = dayFmtEN.format(d).toLowerCase();
+            const iso = isoOf(d);
+            seen[dayEN] = (seen[dayEN] || 0) + 1;
+            const key = seen[dayEN] === 1 ? dayEN : 'next_' + dayEN;
+            parts.push(key + '=' + iso);
         }
-        const nextDays = nextDaysArr.slice(0, 7).join(', ');
+        const nextDays = parts.join(', ');
+
+        console.log('assistant-config: ' + restaurant.name + ' today=' + currentDateISO);
 
         res.json({
             assistant: {
@@ -120,9 +126,8 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
                     humanPhone: restaurant.phone || '',
                     openingHours: openingHoursFormatted,
                     restaurantId: restaurant.id,
-                    currentDate: parisFull,
+                    currentDate,
                     currentDateISO,
-                    currentDay,
                     nextDays
                 }
             }
