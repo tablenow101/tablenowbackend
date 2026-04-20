@@ -89,6 +89,29 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
 
         console.log(`✅ assistant-config: ${restaurant.name}`);
 
+        // Inject current date in Paris timezone
+        const now = new Date();
+        const parisFull = new Intl.DateTimeFormat('fr-FR', {
+            timeZone: 'Europe/Paris',
+            weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
+        }).format(now);
+        const parisISOParts = new Intl.DateTimeFormat('fr-FR', {
+            timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit'
+        }).formatToParts(now).reduce((acc: any, p) => { acc[p.type] = p.value; return acc; }, {});
+        const currentDateISO = parisISOParts.year + '-' + parisISOParts.month + '-' + parisISOParts.day;
+        const currentDay = parisFull.split(' ')[0];
+
+        // Pre-compute next 7 day names → ISO dates
+        const nextDaysArr: string[] = [];
+        for (let i = 1; i <= 14; i++) {
+            const d = new Date(now.getTime() + i * 86400000);
+            const label = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long' }).format(d);
+            const parts = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d).reduce((acc: any, p) => { acc[p.type] = p.value; return acc; }, {});
+            const isoStr = parts.year + '-' + parts.month + '-' + parts.day;
+            if (!nextDaysArr.find(s => s.startsWith(label))) nextDaysArr.push(label + '_prochain=' + isoStr);
+        }
+        const nextDays = nextDaysArr.slice(0, 7).join(', ');
+
         res.json({
             assistant: {
                 variableValues: {
@@ -96,7 +119,11 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
                     address: restaurant.address || '',
                     humanPhone: restaurant.phone || '',
                     openingHours: openingHoursFormatted,
-                    restaurantId: restaurant.id
+                    restaurantId: restaurant.id,
+                    currentDate: parisFull,
+                    currentDateISO,
+                    currentDay,
+                    nextDays
                 }
             }
         });
