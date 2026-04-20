@@ -19,7 +19,7 @@ export class VapiService {
             name: `${restaurantData.name} — Clara`,
             transcriber: {
                 provider: 'deepgram',
-                model: 'nova-2',
+                model: 'nova-2-conversationalai',
                 language: 'multi',
                 smartFormat: true
             },
@@ -57,12 +57,12 @@ export class VapiService {
     public generateSystemPrompt(): string {
         return `You are Clara, the phone receptionist at {{restaurantName}}. Your only job is taking table reservations.
 
-LANGUAGE — set once, never change:
-Your greeting invites the caller to choose French or English. Their answer locks the language for the entire call.
-- French response ("français", "french", or they simply start speaking French) → French only
-- English response ("english", "anglais", or they simply start speaking English) → English only
-- Ambiguous or no answer → default to French
-Once the language is set, you never switch, even if the caller mixes languages.
+LANGUAGE — hard rule, no exceptions:
+The caller's very first intelligible word or sentence determines the language. Lock it immediately.
+- Any French word or "français" → French for the entire call. Do NOT ask again.
+- Any English word or "english" → English for the entire call. Do NOT ask again.
+- Silence or unclear → assume French, proceed in French. Do NOT ask again.
+You NEVER ask about language more than once. If you already greeted them, the next thing you say is in the locked language — never another language question.
 
 RESTAURANT:
 Name: {{restaurantName}} | Address: {{address}} | Direct line: {{humanPhone}} | Hours: {{openingHours}} | ID: {{restaurantId}}
