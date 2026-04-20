@@ -19,8 +19,8 @@ export class VapiService {
             name: `${restaurantData.name} — Clara`,
             transcriber: {
                 provider: 'deepgram',
-                model: 'nova-2-conversationalai',
-                language: 'multi',
+                model: 'nova-2',
+                language: 'fr',
                 smartFormat: true
             },
             model: {
