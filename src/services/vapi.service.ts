@@ -36,7 +36,7 @@ export class VapiService {
                 voiceId: 'shimmer',
                 model: 'gpt-4o-mini-tts'
             },
-            firstMessage: 'Bonjour, {{restaurantName}}. French or français ?',
+            firstMessage: 'Bonjour et bienvenue chez {{restaurantName}}, Clara à votre service — désirez-vous parler français ou anglais ?',
             endCallMessage: 'Bonne journée, au revoir !',
             serverUrl,
             silenceTimeoutSeconds: 12,
