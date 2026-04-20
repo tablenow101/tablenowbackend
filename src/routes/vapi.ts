@@ -93,15 +93,15 @@ router.post('/assistant-config', async (req: Request, res: Response) => {
         const fmtFull = new Intl.DateTimeFormat('fr-FR', { timeZone: tz, weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
         const currentDate = fmtFull.format(now);
         const todayParts = new Intl.DateTimeFormat('fr-FR', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
-            .formatToParts(now).reduce((a, p) => { a[p.type] = p.value; return a; }, {});
+            .formatToParts(now).reduce((a: any, p) => { a[p.type] = p.value; return a; }, {} as any);
         const currentDateISO = todayParts['year'] + '-' + todayParts['month'] + '-' + todayParts['day'];
         const isoFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
         const dayFmtEN = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' });
-        const isoOf = (d) => {
-            const p = isoFmt.formatToParts(d).reduce((a, x) => { a[x.type] = x.value; return a; }, {});
+        const isoOf = (d: Date) => {
+            const p = isoFmt.formatToParts(d).reduce((a: any, x) => { a[x.type] = x.value; return a; }, {} as any);
             return p['year'] + '-' + p['month'] + '-' + p['day'];
         };
-        const seen = {};
+        const seen: Record<string, number> = {};
         const parts = [
             'tomorrow=' + isoOf(new Date(now.getTime() + 86400000)),
             'day_after_tomorrow=' + isoOf(new Date(now.getTime() + 172800000))

@@ -21,8 +21,7 @@ export class VapiService {
                 provider: 'deepgram',
                 model: 'nova-2',
                 language: 'multi',
-                smartFormat: true,
-                punctuate: true
+                smartFormat: true
             },
             model: {
                 provider: 'openai',
@@ -35,8 +34,7 @@ export class VapiService {
             voice: {
                 provider: 'openai',
                 voiceId: 'shimmer',
-                model: 'gpt-4o-mini-tts',
-                voiceGuidance: 'Speak naturally and warmly, like a real receptionist. Keep a calm, professional pace. Never robotic or rushed.'
+                model: 'gpt-4o-mini-tts'
             },
             firstMessage: 'Bonjour, {{restaurantName}}, Clara à votre service, comment puis-je vous aider ?',
             endCallMessage: 'Bonne journée, au revoir !',
